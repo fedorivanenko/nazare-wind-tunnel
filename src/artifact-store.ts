@@ -67,7 +67,7 @@ async function signedFetch(method: 'GET' | 'PUT', key: string, body?: Buffer, me
       'x-amz-content-sha256': payloadHash,
       ...(method === 'PUT' ? {'content-type': mediaType} : {}),
     },
-    body: method === 'PUT' ? body : undefined,
+    body: method === 'PUT' && body ? new Uint8Array(body) : undefined,
   });
   if (!response.ok) throw new Error(`S3 ${method} ${key} failed: ${response.status} ${await response.text()}`);
   return response;
