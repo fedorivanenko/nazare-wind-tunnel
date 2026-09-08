@@ -1,5 +1,5 @@
 import {spawn} from 'node:child_process';
-import {withElapsed, type ArtifactRecord, type RunEvent, type RunLifecycle, type RunOutcome, type RunSpec, type RunState} from './domain';
+import {withElapsed, type ArtifactRecord, type FailureKind, type RunEvent, type RunLifecycle, type RunOutcome, type RunSpec, type RunState} from './domain';
 
 const DATABASE_URL = process.env.DATABASE_URL ?? '';
 const LEASE_SECONDS = Number(process.env.WIND_TUNNEL_LEASE_SECONDS ?? 90);
@@ -47,6 +47,7 @@ function parseState(raw: string): RunState {
     finished_at: string | null;
     updated_at: string;
     error: string | null;
+    failure_kind: FailureKind | null;
     worker_id: string | null;
     lease_until: string | null;
     attempts: number;
@@ -63,6 +64,7 @@ function parseState(raw: string): RunState {
     updatedAt: row.updated_at,
     elapsedMs: 0,
     error: row.error,
+    failureKind: row.failure_kind ?? null,
     workerId: row.worker_id,
     leaseUntil: row.lease_until,
     attempts: row.attempts,
@@ -80,6 +82,7 @@ const STATE_JSON = `json_build_object(
   'finished_at', finished_at,
   'updated_at', updated_at,
   'error', error,
+  'failure_kind', failure_kind,
   'worker_id', worker_id,
   'lease_until', lease_until,
   'attempts', attempts,
@@ -98,12 +101,14 @@ export async function ensureSchema() {
       finished_at timestamptz NULL,
       updated_at timestamptz NOT NULL DEFAULT now(),
       error text NULL,
+      failure_kind text NULL,
       worker_id text NULL,
       lease_until timestamptz NULL,
       attempts integer NOT NULL DEFAULT 0,
       spec jsonb NOT NULL,
       arms jsonb NOT NULL
     );
+    ALTER TABLE wind_tunnel_runs ADD COLUMN IF NOT EXISTS failure_kind text NULL;
     CREATE INDEX IF NOT EXISTS wind_tunnel_runs_claim_idx ON wind_tunnel_runs (status, lease_until, created_at);
 
     CREATE TABLE IF NOT EXISTS wind_tunnel_events (
@@ -224,6 +229,7 @@ export async function saveRunState(state: RunState) {
         finished_at = ${sqlLiteral(finishedAt)}::timestamptz,
         updated_at = ${sqlLiteral(now)}::timestamptz,
         error = ${sqlLiteral(state.error)},
+        failure_kind = ${sqlLiteral(state.failureKind)},
         lease_until = CASE WHEN ${terminal ? 'TRUE' : 'FALSE'} THEN NULL ELSE lease_until END,
         arms = ${jsonLiteral(state.arms)}
     WHERE run_id = ${sqlLiteral(state.runId)}::uuid
@@ -264,10 +270,11 @@ export async function listArtifacts(runId: string, arm?: string) {
   const filter = arm ? `AND arm = ${sqlLiteral(arm)}` : '';
   const raw = await psql(`
     SELECT COALESCE(json_agg(json_build_object(
-      'runId', run_id::text, 'arm', arm, 'type', type, 'key', object_key,
-      'mediaType', media_type, 'bytes', bytes, 'sha256', sha256, 'createdAt', created_at
-    ) ORDER BY created_at, object_key), '[]'::json)::text
-    FROM wind_tunnel_artifacts WHERE run_id = ${sqlLiteral(runId)}::uuid ${filter};
+      'runId', run_id::text, 'arm', arm, 'type', type, 'key', object_key, 'mediaType', media_type,
+      'bytes', bytes, 'sha256', sha256, 'createdAt', created_at
+    ) ORDER BY created_at), '[]'::json)::text
+    FROM wind_tunnel_artifacts
+    WHERE run_id = ${sqlLiteral(runId)}::uuid ${filter};
   `);
   return JSON.parse(raw || '[]') as ArtifactRecord[];
 }
