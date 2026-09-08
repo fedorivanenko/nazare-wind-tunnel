@@ -1,7 +1,7 @@
 {
   "name": "nazare-wind-tunnel",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "start": "tsx src/workstation-mcp.ts",
@@ -9,9 +9,12 @@
     "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1"
+  },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "tsx": "^4.23.13",
+    "@types/node": "24.13.3",
+    "tsx": "4.23.13",
     "typescript": "5.9.3"
   },
   "engines": {
