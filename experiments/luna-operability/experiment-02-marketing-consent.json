@@ -1,0 +1,20 @@
+{
+  "id": "marketing-consent-02",
+  "taskFile": "experiments/luna-operability/task-02-marketing-consent.md",
+  "agent": {
+    "provider": "vercel-ai-gateway",
+    "model": "openai/gpt-oss-20b",
+    "thinking": "low",
+    "timeoutMs": 900000
+  },
+  "nazare": {
+    "capabilityId": "capability.collect-email-subscribers",
+    "requestedChange": "Require explicit marketing consent before newsletter signup"
+  },
+  "verification": [
+    "npm run lint",
+    "npm test",
+    "npm run typecheck",
+    "npm run build"
+  ]
+}

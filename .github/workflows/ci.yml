@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install
+      - run: npm test
+      - run: npm run typecheck
+      - name: Verify trust boundary
+        run: |
+          grep -q "subjectSha" README.md
+          grep -q "evaluatorSha" README.md
+          grep -q "independentVariable: 'contextCompiler'" src/domain.ts
+          grep -q "git fetch --depth 1 origin" src/worker.ts
