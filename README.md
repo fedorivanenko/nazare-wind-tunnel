@@ -1,96 +1,103 @@
 # Nazare Wind Tunnel
 
-Independent evaluation infrastructure for Nazare experiments.
+Wind Tunnel searches over versions of the **software environment** until a fixed model can solve a frozen task inside a fixed budget.
 
-The system under test lives in `fedorivanenko/nazare-hydrogen`. Wind Tunnel owns the experiment definitions, task corpus, verifier configuration, run lifecycle, artifacts, and evaluation policy.
+The target, task, model, harness, budget, and verifier stay fixed. Only `environment/` changes.
 
-## Trust boundary
-
-Every run freezes two independent commits:
-
-- `subjectSha` — the exact `nazare-hydrogen` commit being tested.
-- `evaluatorSha` — the exact `nazare-wind-tunnel` commit defining the benchmark and judge.
-
-The candidate may change the subject, but it cannot change the evaluator, benchmark corpus, verifier, scoring policy, or acceptance logic.
-
-## Runtime
+## Architecture
 
 ```text
-ChatGPT / CLI / dashboard
-          |
-          v
-Railway control + OAuth
-  freeze evaluatorSha + subjectSha
-          |
-          v
-Postgres durable queue/state
-          |
-          v
-Railway worker
-  checkout subjectSha
-  npm ci
-  raw + nazare worktrees
-  same Pi/model/task/verifier
-          |
-          v
-Railway S3 bucket
-  patches, transcripts, compiled context,
-  changed files, verifier output, metrics
+ChatGPT
+  |
+  | MCP
+  v
+persistent Railway service
+  |
+  +-- /workspace/target        nazare-hydrogen @ WIND_TUNNEL_TARGET_SHA
+  |      node_modules prepared once and kept warm
+  |
+  +-- /workspace/environment   clone of this repo, checked out at env/* ref
+  |
+  +-- /workspace/runs          persistent run artifacts
+  |
+  +-- fixed runner + benchmark config from deployed main/core commit
 ```
 
-The experimental independent variable is only the context compiler:
+A run does exactly this:
 
-- `raw` — Pi works on the subject repository normally.
-- `nazare` — the same Pi/model gets the same repository and task plus `.nazare/task.json` compiled by Nazare.
-
-## Services
-
-Public control service start command:
-
-```sh
-npx tsx src/oauth-gateway.ts
+```text
+resolve env branch -> exact SHA
+reset target -> frozen SHA
+project environment/ -> target/.nazare/
+run Pi under fixed time/token/tool-call budget
+run deterministic checkers
+save patch + transcript + metrics + verifier output
 ```
 
-Private worker start command:
+## What is fixed
 
-```sh
-npx tsx src/worker.ts
+`benchmark/config.json` owns the controls:
+
+- task
+- model/provider/thinking
+- hard wall-clock budget
+- hard tool-call budget
+- token budget when Pi exposes usage in JSON events
+- allowed Pi tools
+- deterministic checkers
+
+Environment branches must not change benchmark controls for a run. They are resolved only for the contents of `environment/`.
+
+## What changes
+
+Use branches for environment strategies, for example:
+
+```text
+env/current
+env/minimal
+env/registry
+env/projection
+env/repair-spec
 ```
 
-Both services should deploy the same `nazare-wind-tunnel` commit.
+Each run records the exact commit SHA behind the supplied environment ref.
 
-## Required environment
+## MCP
 
-Control:
+The deployed service exposes only:
 
-- `DATABASE_URL`
-- `WIND_TUNNEL_TOKEN`
-- `WIND_TUNNEL_S3_BUCKET`
-- `WIND_TUNNEL_S3_REGION`
-- `WIND_TUNNEL_S3_ENDPOINT`
-- `WIND_TUNNEL_S3_ACCESS_KEY`
-- `WIND_TUNNEL_S3_SECRET_KEY`
-- `WIND_TUNNEL_SUBJECT_REPO=fedorivanenko/nazare-hydrogen`
-- `WIND_TUNNEL_SUBJECT_REF=main`
-- `RAILPACK_DEPLOY_APT_PACKAGES=postgresql-client git`
+- `workspace_status()`
+- `run_test(environmentRef?)`
+- `get_run(runId)`
+- `get_latest_run()`
+- `list_runs(limit?)`
 
-Worker:
+## Required Railway configuration
 
-- same Postgres/S3 variables
-- `AI_GATEWAY_API_KEY`
-- `RAILPACK_DEPLOY_APT_PACKAGES=postgresql-client git`
+Mount one persistent volume at `/workspace` and set:
 
-The public control service keeps the existing `/workspace` volume only for OAuth state. Run state lives in Postgres, artifacts live in S3, and subject workspaces are disposable.
+```text
+WIND_TUNNEL_TOKEN=...
+WIND_TUNNEL_TARGET_SHA=<exact 40-char nazare-hydrogen SHA>
+WIND_TUNNEL_TARGET_REPO=fedorivanenko/nazare-hydrogen
+WIND_TUNNEL_ENV_REPO=fedorivanenko/nazare-wind-tunnel
+WIND_TUNNEL_ENV_REF=env/current
+AI_GATEWAY_API_KEY=...
+```
 
-## MCP surface
+Build with `Dockerfile.control`. There is no worker, Postgres, S3, queue, or per-run dependency install in the active design.
 
-- `workspace_status`
-- `list_experiments`
-- `get_experiment`
-- `start_experiment`
-- `get_run_status`
-- `get_run`
-- `get_run_artifacts`
-- `list_runs`
+On service startup the target is cloned/reset and `npm ci` is run only when the frozen target lockfile does not match the prepared `node_modules` marker. Subsequent runs reuse the prepared dependencies.
 
-`start_experiment` accepts an optional exact `subjectSha`; otherwise it resolves the configured subject branch and freezes its current GitHub SHA before queueing the run.
+## Iteration loop
+
+```text
+edit environment branch
+commit
+run_test("env/my-idea")
+inspect result + patch + transcript
+change environment
+repeat
+```
+
+The optimization target is **verified task success inside the fixed budget**.
