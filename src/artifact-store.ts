@@ -7,6 +7,7 @@ const ENDPOINT = process.env.WIND_TUNNEL_S3_ENDPOINT ?? '';
 const REGION = process.env.WIND_TUNNEL_S3_REGION ?? 'auto';
 const ACCESS_KEY = process.env.WIND_TUNNEL_S3_ACCESS_KEY ?? '';
 const SECRET_KEY = process.env.WIND_TUNNEL_S3_SECRET_KEY ?? '';
+const FORCE_PATH_STYLE = process.env.WIND_TUNNEL_S3_FORCE_PATH_STYLE === '1';
 const SERVICE = 's3';
 
 function sha256(value: Buffer | string) {
@@ -28,14 +29,19 @@ function requireConfig() {
   }
 }
 
-function encodePath(path: string) {
-  return path.split('/').map(segment => encodeURIComponent(segment)).join('/');
+function encodePath(value: string) {
+  return value.split('/').map(segment => encodeURIComponent(segment)).join('/');
 }
 
 function objectUrl(key: string) {
   const url = new URL(ENDPOINT);
-  url.hostname = `${BUCKET}.${url.hostname}`;
-  url.pathname = `/${encodePath(key)}`;
+  if (FORCE_PATH_STYLE) {
+    const base = url.pathname.replace(/\/$/, '');
+    url.pathname = `${base}/${encodeURIComponent(BUCKET)}/${encodePath(key)}`;
+  } else {
+    url.hostname = `${BUCKET}.${url.hostname}`;
+    url.pathname = `/${encodePath(key)}`;
+  }
   url.search = '';
   return url;
 }
