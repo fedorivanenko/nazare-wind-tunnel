@@ -45,36 +45,73 @@ export async function runPi(options: PiRunOptions): Promise<PiRunResult> {
 
   const started = Date.now();
   return await new Promise((resolve, reject) => {
+    const detached = process.platform !== 'win32';
     const child = spawn('npx', args, {
       cwd: options.cwd,
+      detached,
       env: {
         ...process.env,
         PI_SKIP_VERSION_CHECK: process.env.PI_SKIP_VERSION_CHECK ?? '1',
         PI_TELEMETRY: process.env.PI_TELEMETRY ?? '0',
+        AI_GATEWAY_API_KEY: process.env.AI_GATEWAY_API_KEY ?? process.env.VERCEL_AI_GATEWAY_API_KEY ?? '',
       },
     });
     let stdout = '';
     let stderr = '';
+    let lineBuffer = '';
+    let settled = false;
+    let agentError: string | null = null;
     let timedOut = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
 
-    child.stdout?.on('data', chunk => { stdout = appendBounded(stdout, chunk); });
-    child.stderr?.on('data', chunk => { stderr = appendBounded(stderr, chunk); });
-    child.on('error', reject);
+    const terminate = (signal: NodeJS.Signals) => {
+      try {
+        if (detached && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {}
+    };
+    const terminateGracefully = () => {
+      terminate('SIGTERM');
+      forceKillTimer = setTimeout(() => terminate('SIGKILL'), 5_000);
+      forceKillTimer.unref();
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
+      terminateGracefully();
     }, options.timeoutMs);
+
+    child.stdout?.on('data', chunk => {
+      stdout = appendBounded(stdout, chunk);
+      lineBuffer += chunk.toString();
+      const lines = lineBuffer.split('\n');
+      lineBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line) as {type?: string; message?: {stopReason?: string; errorMessage?: string}};
+          if (event.type === 'message_end' && event.message?.stopReason === 'error') {
+            agentError = event.message.errorMessage ?? 'Pi model request failed';
+          }
+          if (event.type === 'agent_settled' && !settled) {
+            settled = true;
+            clearTimeout(timer);
+            terminateGracefully();
+          }
+        } catch {}
+      }
+    });
+    child.stderr?.on('data', chunk => { stderr = appendBounded(stderr, chunk); });
+    child.on('error', reject);
 
     child.on('close', (exitCode, signal) => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       resolve({
         command: `npx ${args.slice(0, -1).join(' ')} <prompt>`,
-        exitCode,
+        exitCode: agentError ? 1 : settled ? 0 : exitCode,
         signal,
         stdout,
-        stderr,
+        stderr: agentError ? `${stderr}\n${agentError}`.trim() : stderr,
         durationMs: Date.now() - started,
         timedOut,
       });
