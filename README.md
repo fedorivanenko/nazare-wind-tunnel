@@ -1,86 +1,125 @@
 # Nazare Wind Tunnel
 
-Independent evaluation infrastructure for Nazare experiments.
+Independent evaluation infrastructure for Nazare environment-compiler experiments.
 
-The system under test lives in `fedorivanenko/nazare-hydrogen`. Wind Tunnel owns the experiment definitions, task corpus, verifier configuration, run lifecycle, artifacts, and evaluation policy.
+The system under test lives in `fedorivanenko/nazare-hydrogen`. Wind Tunnel owns the experiment definitions, task corpus, verifier configuration, run lifecycle, artifacts, execution provenance, and evaluation policy.
 
 ## Trust boundary
 
-Every run freezes two independent commits:
+Every run freezes independent immutable inputs:
 
 - `subjectSha` — the exact `nazare-hydrogen` commit being tested.
 - `evaluatorSha` — the exact `nazare-wind-tunnel` commit defining the benchmark and judge.
+- `workerImageDigest` — the exact execution environment expected by the worker.
+- environment definitions — the named compiler/version/config used by each arm.
+- model, harness, task digest, verifier configuration, and experiment digest.
 
-The candidate may change the subject, but it cannot change the evaluator, benchmark corpus, verifier, scoring policy, or acceptance logic.
+The candidate may change only its disposable subject workspace. It cannot change the evaluator, benchmark corpus, verifier, scoring policy, or acceptance logic.
 
-## Runtime
+The experimental independent variable is `environmentCompiler`.
+
+## Architecture
 
 ```text
 ChatGPT / CLI / dashboard
           |
           v
-Railway control + OAuth
+control / MCP
   freeze evaluatorSha + subjectSha
+  + workerImageDigest + environments
           |
           v
 Postgres durable queue/state
           |
           v
-Railway worker
-  checkout subjectSha
-  npm ci
-  raw + nazare worktrees
-  same Pi/model/task/verifier
+worker (same Docker image locally/Railway)
+  startup preflight
+  checkout exact subjectSha
           |
-          v
-Railway S3 bucket
-  patches, transcripts, compiled context,
-  changed files, verifier output, metrics
+     +----+-------------------+
+     |                        |
+     v                        v
+raw workspace         nazare-projection-v1 workspace
+npm ci                npm ci
+compiler:none         compiler:nazare
+     |                        |
+     +--------- same Pi/model/task --------+
+                              |
+                              v
+                       same independent verifier
+                              |
+                              v
+                         S3 artifacts
 ```
 
-The experimental independent variable is only the context compiler:
+`raw` is not a special execution path. It is an environment definition with `compiler: "none"`. Nazare variants are named/versioned environment definitions such as `nazare-projection-v1`. More variants can be added without changing the worker orchestration.
 
-- `raw` — Pi works on the subject repository normally.
-- `nazare` — the same Pi/model gets the same repository and task plus `.nazare/task.json` compiled by Nazare.
+Each arm has an independent mutable worktree and independent dependency install. A shared package-manager cache is acceptable, but mutable `node_modules` is not shared between arms.
 
-## Services
+## Local parity
 
-Public control service start command:
+The same controller/worker code and worker Dockerfile are used locally and on Railway.
+
+Start the local stack:
 
 ```sh
-npx tsx src/oauth-gateway.ts
+VERCEL_AI_GATEWAY_API_KEY=... docker compose up --build
 ```
 
-Private worker start command:
+This starts:
 
-```sh
-npx tsx src/worker.ts
-```
+- control on `http://localhost:3001`
+- worker
+- Postgres on local port `54329`
+- MinIO S3-compatible storage on `9000` with console on `9001`
 
-Both services should deploy the same `nazare-wind-tunnel` commit.
+Local MCP token: `local-wind-tunnel-token`.
+
+The worker refuses to start if required runtime tools are missing. Preflight checks `git`, `node`, `npm`, `npx`, `psql`, Postgres configuration, and artifact-store configuration before the worker can claim a run.
+
+## Railway
+
+Build and deploy `Dockerfile.worker` for the private worker and `Dockerfile.control` for control/OAuth. Railway should run the exact image digest tested locally and provide that digest to both services as `WIND_TUNNEL_WORKER_IMAGE_DIGEST`.
+
+Do not install subject runtime dependencies through Railway-specific shell setup. Node/npm/git/psql are declared by the worker image; subject dependencies are installed inside each disposable arm workspace with `npm ci`.
 
 ## Required environment
 
-Control:
+Shared control/worker configuration:
 
 - `DATABASE_URL`
-- `WIND_TUNNEL_TOKEN`
 - `WIND_TUNNEL_S3_BUCKET`
 - `WIND_TUNNEL_S3_REGION`
 - `WIND_TUNNEL_S3_ENDPOINT`
 - `WIND_TUNNEL_S3_ACCESS_KEY`
 - `WIND_TUNNEL_S3_SECRET_KEY`
+- `WIND_TUNNEL_WORKER_IMAGE_DIGEST`
 - `WIND_TUNNEL_SUBJECT_REPO=fedorivanenko/nazare-hydrogen`
 - `WIND_TUNNEL_SUBJECT_REF=main`
-- `RAILPACK_DEPLOY_APT_PACKAGES=postgresql-client git`
 
-Worker:
+Control additionally needs:
 
-- same Postgres/S3 variables
-- `AI_GATEWAY_API_KEY`
-- `RAILPACK_DEPLOY_APT_PACKAGES=postgresql-client git`
+- `WIND_TUNNEL_TOKEN`
 
-The public control service keeps the existing `/workspace` volume only for OAuth state. Run state lives in Postgres, artifacts live in S3, and subject workspaces are disposable.
+Worker additionally needs the model-provider credentials used by the experiment, currently the Vercel AI Gateway credential.
+
+For local MinIO only, set `WIND_TUNNEL_S3_FORCE_PATH_STYLE=1`.
+
+## Failure semantics
+
+Infrastructure failure is separated from experimental failure.
+
+Examples of infrastructure failure kinds:
+
+- `worker_environment`
+- `source_checkout`
+- `dependency_install`
+- `environment_compile`
+- `agent_harness`
+- `model_provider`
+- `verification_infrastructure`
+
+A verifier command returning non-zero after a successful agent run is an experimental arm outcome (`fail`), not an infrastructure failure.
 
 ## MCP surface
 
@@ -93,4 +132,6 @@ The public control service keeps the existing `/workspace` volume only for OAuth
 - `get_run_artifacts`
 - `list_runs`
 
-`start_experiment` accepts an optional exact `subjectSha`; otherwise it resolves the configured subject branch and freezes its current GitHub SHA before queueing the run.
+`list_experiments` returns an object containing the available experiment definitions and their environment versions.
+
+`start_experiment` accepts environment ids in `arms`. It also accepts an optional exact `subjectSha`; otherwise it resolves the configured subject branch and freezes its current GitHub SHA before queueing the run.
