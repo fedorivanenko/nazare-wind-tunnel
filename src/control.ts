@@ -5,9 +5,11 @@ import {readFile, readdir} from 'node:fs/promises';
 import path from 'node:path';
 import {getArtifact} from './artifact-store';
 import {
+  defaultEnvironments,
   normalizeVerification,
   type Arm,
   type ArmState,
+  type EnvironmentSpec,
   type ExperimentDefinition,
   type RunSpec,
 } from './domain';
@@ -29,6 +31,7 @@ const SUBJECT_REPO = process.env.WIND_TUNNEL_SUBJECT_REPO ?? 'fedorivanenko/naza
 const SUBJECT_REF = process.env.WIND_TUNNEL_SUBJECT_REF ?? 'main';
 const TOKEN = process.env.WIND_TUNNEL_TOKEN;
 const PI_PACKAGE = process.env.WIND_TUNNEL_PI_PACKAGE ?? '@earendil-works/pi-coding-agent@0.85.1';
+const WORKER_IMAGE_DIGEST = process.env.WIND_TUNNEL_WORKER_IMAGE_DIGEST ?? 'local';
 const DEFAULT_EXPERIMENT = 'experiments/luna-operability/experiment-02-marketing-consent.json';
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -38,7 +41,7 @@ type ExperimentInfo = {
   id: string;
   taskFile: string;
   agent: ExperimentDefinition['agent'];
-  nazare: ExperimentDefinition['nazare'];
+  environments: Record<string, EnvironmentSpec>;
   verification: ReturnType<typeof normalizeVerification>;
   definition: ExperimentDefinition;
 };
@@ -113,7 +116,7 @@ async function loadExperiment(name: string): Promise<ExperimentInfo> {
       id: definition.id,
       taskFile: definition.taskFile,
       agent: definition.agent,
-      nazare: definition.nazare,
+      environments: defaultEnvironments(definition),
       verification: normalizeVerification(definition),
       definition,
     };
@@ -122,28 +125,31 @@ async function loadExperiment(name: string): Promise<ExperimentInfo> {
 }
 
 async function listExperiments() {
-  const result = [];
+  const experiments = [];
   for (const full of await listExperimentFiles()) {
     const relative = path.relative(APP_DIR, full);
     try {
       const experiment = await loadExperiment(relative);
-      result.push({
+      experiments.push({
         name: experiment.name,
         id: experiment.id,
         taskFile: experiment.taskFile,
         agent: experiment.agent,
-        nazare: experiment.nazare,
+        environments: experiment.environments,
         verification: experiment.verification,
       });
     } catch {}
   }
-  return result;
+  return {experiments};
 }
 
-function parseArms(value: unknown): Arm[] {
-  const requested = Array.isArray(value) ? value.map(String) : ['raw', 'nazare'];
-  const arms = [...new Set(requested.filter((item): item is Arm => item === 'raw' || item === 'nazare'))];
-  if (!arms.length) throw new Error('arms must contain raw and/or nazare');
+function parseArms(value: unknown, environments: Record<string, EnvironmentSpec>): Arm[] {
+  const available = Object.keys(environments);
+  const requested = Array.isArray(value) ? value.map(String) : available;
+  const arms = [...new Set(requested)];
+  if (!arms.length) throw new Error('arms must contain at least one environment id');
+  const unknown = arms.filter(item => !environments[item]);
+  if (unknown.length) throw new Error(`Unknown environment arm(s): ${unknown.join(', ')}. Available: ${available.join(', ')}`);
   return arms;
 }
 
@@ -172,12 +178,13 @@ async function startExperiment(args: Record<string, unknown>) {
     throw new Error('Evaluator SHA is unavailable in Railway; refusing unverifiable run');
   }
   const experiment = await loadExperiment(String(args.experiment ?? DEFAULT_EXPERIMENT));
-  const arms = parseArms(args.arms);
+  const arms = parseArms(args.arms, experiment.environments);
   const rawDefinition = await readFile(safeEvaluatorPath(experiment.name), 'utf8');
   const task = await readFile(safeEvaluatorPath(experiment.taskFile), 'utf8');
   const subjectSha = await resolveSubjectSha(args.subjectSha ? String(args.subjectSha) : undefined);
   const runId = randomUUID();
   const createdAt = new Date().toISOString();
+  const environments = Object.fromEntries(arms.map(arm => [arm, experiment.environments[arm]]));
   const spec: RunSpec = {
     runId,
     evaluator: {
@@ -190,6 +197,7 @@ async function startExperiment(args: Record<string, unknown>) {
     experiment: {path: experiment.name, id: experiment.id},
     task: {path: experiment.taskFile},
     arms,
+    environments,
     agent: {
       harness: experiment.agent.harness ?? 'pi',
       package: experiment.agent.package ?? PI_PACKAGE,
@@ -199,6 +207,7 @@ async function startExperiment(args: Record<string, unknown>) {
       timeoutMs: Number(experiment.agent.timeoutMs ?? 15 * 60 * 1000),
     },
     verification: experiment.verification,
+    execution: {workerImageDigest: WORKER_IMAGE_DIGEST},
     controls: {
       subjectSource: 'identical',
       evaluator: 'immutable',
@@ -206,7 +215,8 @@ async function startExperiment(args: Record<string, unknown>) {
       harness: 'identical',
       model: 'identical',
       provider: 'identical',
-      independentVariable: 'contextCompiler',
+      workerImage: 'identical',
+      independentVariable: 'environmentCompiler',
     },
     createdAt,
   };
@@ -218,6 +228,7 @@ async function startExperiment(args: Record<string, unknown>) {
     finishedAt: null,
     elapsedMs: 0,
     error: null,
+    failureKind: null,
     workspaceBaselineCommit: null,
   } satisfies ArmState]));
   await createRun(spec, armStates);
@@ -226,8 +237,11 @@ async function startExperiment(args: Record<string, unknown>) {
     status: 'queued',
     subjectSha,
     evaluatorSha: EVALUATOR_SHA,
+    workerImageDigest: WORKER_IMAGE_DIGEST,
     experimentDigest: spec.evaluator.experimentDigest,
     taskDigest: spec.evaluator.taskDigest,
+    arms,
+    environments,
   };
 }
 
@@ -248,9 +262,10 @@ async function workspaceStatus() {
   const active = await listActiveRuns();
   return {
     controller: 'wind-tunnel-control',
-    version: '2.0.0',
+    version: '3.0.0',
     evaluator: {repository: EVALUATOR_REPO, sha: EVALUATOR_SHA},
     subject: {repository: SUBJECT_REPO, defaultRef: SUBJECT_REF},
+    execution: {workerImageDigest: WORKER_IMAGE_DIGEST},
     activeRuns: active.map(run => ({
       runId: run.runId,
       status: run.status,
@@ -259,19 +274,20 @@ async function workspaceStatus() {
       leaseUntil: run.leaseUntil,
       subjectSha: run.spec.subject.githubSha,
       evaluatorSha: run.spec.evaluator.githubSha,
+      workerImageDigest: run.spec.execution?.workerImageDigest ?? null,
     })),
     persistence: {runs: 'postgres', artifacts: 's3'},
   };
 }
 
 const tools = [
-  {name: 'workspace_status', description: 'Inspect evaluator provenance, subject repository configuration, and active durable runs.', inputSchema: {type: 'object', properties: {}, additionalProperties: false}},
-  {name: 'list_experiments', description: 'List immutable benchmark definitions from the evaluator repository.', inputSchema: {type: 'object', properties: {}, additionalProperties: false}},
-  {name: 'get_experiment', description: 'Inspect a benchmark definition and normalized verifier configuration.', inputSchema: {type: 'object', required: ['name'], properties: {name: {type: 'string'}}, additionalProperties: false}},
-  {name: 'start_experiment', description: 'Freeze evaluatorSha + subjectSha into an immutable RunSpec and enqueue it.', inputSchema: {type: 'object', properties: {experiment: {type: 'string'}, subjectSha: {type: 'string', description: 'Optional exact 40-character subject SHA or branch ref. Defaults to configured subject ref.'}, arms: {type: 'array', items: {type: 'string', enum: ['raw', 'nazare']}}}, additionalProperties: false}},
-  {name: 'get_run_status', description: 'Read durable lifecycle, per-arm progress, elapsed time, outcome, worker lease, subjectSha and evaluatorSha.', inputSchema: {type: 'object', required: ['runId'], properties: {runId: {type: 'string'}}, additionalProperties: false}},
+  {name: 'workspace_status', description: 'Inspect evaluator provenance, subject repository configuration, worker image provenance, and active durable runs.', inputSchema: {type: 'object', properties: {}, additionalProperties: false}},
+  {name: 'list_experiments', description: 'List immutable benchmark definitions and available environment versions.', inputSchema: {type: 'object', properties: {}, additionalProperties: false}},
+  {name: 'get_experiment', description: 'Inspect a benchmark definition, environment versions, and normalized verifier configuration.', inputSchema: {type: 'object', required: ['name'], properties: {name: {type: 'string'}}, additionalProperties: false}},
+  {name: 'start_experiment', description: 'Freeze evaluatorSha + subjectSha + worker image + environment versions into an immutable RunSpec and enqueue it.', inputSchema: {type: 'object', properties: {experiment: {type: 'string'}, subjectSha: {type: 'string', description: 'Optional exact 40-character subject SHA or branch ref. Defaults to configured subject ref.'}, arms: {type: 'array', items: {type: 'string'}, description: 'Environment ids defined by the experiment, e.g. raw or nazare-projection-v1.'}}, additionalProperties: false}},
+  {name: 'get_run_status', description: 'Read durable lifecycle, per-arm progress, elapsed time, outcome, worker lease and immutable provenance.', inputSchema: {type: 'object', required: ['runId'], properties: {runId: {type: 'string'}}, additionalProperties: false}},
   {name: 'get_run', description: 'Read a run at any lifecycle stage, including events and artifact manifest.', inputSchema: {type: 'object', required: ['runId'], properties: {runId: {type: 'string'}}, additionalProperties: false}},
-  {name: 'get_run_artifacts', description: 'Retrieve immutable artifacts and hashes, optionally scoped to an arm.', inputSchema: {type: 'object', required: ['runId'], properties: {runId: {type: 'string'}, arm: {type: 'string', enum: ['raw', 'nazare']}, inline: {type: 'boolean'}}, additionalProperties: false}},
+  {name: 'get_run_artifacts', description: 'Retrieve immutable artifacts and hashes, optionally scoped to any configured arm.', inputSchema: {type: 'object', required: ['runId'], properties: {runId: {type: 'string'}, arm: {type: 'string'}, inline: {type: 'boolean'}}, additionalProperties: false}},
   {name: 'list_runs', description: 'List recent runs for dashboards and inspection.', inputSchema: {type: 'object', properties: {limit: {type: 'number'}}, additionalProperties: false}},
 ] as const;
 
@@ -283,7 +299,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
     case 'start_experiment': return startExperiment(args);
     case 'get_run_status': return getRun(String(args.runId ?? ''));
     case 'get_run': return getRunView(String(args.runId ?? ''));
-    case 'get_run_artifacts': return getRunArtifacts(String(args.runId ?? ''), args.arm ? String(args.arm) as Arm : undefined, args.inline !== false);
+    case 'get_run_artifacts': return getRunArtifacts(String(args.runId ?? ''), args.arm ? String(args.arm) : undefined, args.inline !== false);
     case 'list_runs': return listRuns(Number(args.limit ?? 50));
     default: throw new Error(`Unknown tool: ${name}`);
   }
@@ -314,15 +330,16 @@ async function handleRpc(req: IncomingMessage, res: ServerResponse) {
         json(res, 200, rpcResult(body.id, {
           protocolVersion: String(body.params?.protocolVersion ?? '2025-06-18'),
           capabilities: {tools: {listChanged: false}},
-          serverInfo: {name: 'nazare-wind-tunnel', version: '2.0.0'},
-          instructions: 'Independent experiment evaluator. Each run freezes evaluatorSha and subjectSha; workers use disposable subject workspaces; artifacts are persisted to S3.',
+          serverInfo: {name: 'nazare-wind-tunnel', version: '3.0.0'},
+          instructions: 'Independent environment-compiler benchmark. Each run freezes evaluator, subject, worker image, model/harness and environment versions; workers use disposable subject workspaces; artifacts are persisted to S3.',
         }));
         return;
       case 'ping': json(res, 200, rpcResult(body.id, {})); return;
       case 'tools/list': json(res, 200, rpcResult(body.id, {tools})); return;
       case 'tools/call': {
         const result = await callTool(String(body.params?.name ?? ''), (body.params?.arguments ?? {}) as Record<string, unknown>);
-        json(res, 200, rpcResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent: result, isError: false}));
+        const structuredContent = Array.isArray(result) ? {items: result} : result;
+        json(res, 200, rpcResult(body.id, {content: [{type: 'text', text: JSON.stringify(result, null, 2)}], structuredContent, isError: false}));
         return;
       }
       default: json(res, 200, rpcError(body.id, -32601, `Method not found: ${body.method}`));
@@ -356,7 +373,8 @@ createServer(async (req, res) => {
   res.statusCode = 404;
   res.end();
 }).listen(PORT, '0.0.0.0', () => {
-  console.log(`Nazare Wind Tunnel control v2 listening on ${PORT}`);
+  console.log(`Nazare Wind Tunnel control v3 listening on ${PORT}`);
   console.log(`Evaluator: ${EVALUATOR_REPO}@${EVALUATOR_SHA}`);
   console.log(`Subject: ${SUBJECT_REPO}@${SUBJECT_REF}`);
+  console.log(`Worker image: ${WORKER_IMAGE_DIGEST}`);
 });
