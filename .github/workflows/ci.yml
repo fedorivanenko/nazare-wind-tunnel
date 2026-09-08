@@ -20,5 +20,8 @@ jobs:
         run: |
           grep -q "subjectSha" README.md
           grep -q "evaluatorSha" README.md
-          grep -q "independentVariable: 'contextCompiler'" src/domain.ts
+          grep -q "workerImageDigest" README.md
+          grep -q "independentVariable: 'environmentCompiler'" src/domain.ts
           grep -q "git fetch --depth 1 origin" src/worker.ts
+          grep -q "npm ci" src/worker.ts
+          grep -q "Dockerfile.worker" README.md
