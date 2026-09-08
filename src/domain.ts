@@ -93,6 +93,15 @@ export type RunState = {
   arms: Record<string, ArmState>;
 };
 
+export type RunEvent = {
+  seq?: number;
+  runId: string;
+  type: string;
+  at: string;
+  arm?: Arm;
+  data?: Record<string, unknown>;
+};
+
 export type ArtifactRecord = {
   runId: string;
   arm: Arm | null;
@@ -102,6 +111,18 @@ export type ArtifactRecord = {
   bytes: number;
   sha256: string;
   createdAt: string;
+};
+
+export type VerificationResult = {
+  id: string;
+  command: string;
+  required: boolean;
+  status: 'passed' | 'failed';
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  stdoutArtifact: string | null;
+  stderrArtifact: string | null;
 };
 
 export function normalizeVerification(definition: ExperimentDefinition): VerificationSpec[] {
@@ -116,4 +137,17 @@ export function normalizeVerification(definition: ExperimentDefinition): Verific
       required: item.required ?? true,
     };
   });
+}
+
+export function elapsedMs(startedAt: string | null, finishedAt: string | null, now = Date.now()) {
+  if (!startedAt) return 0;
+  return Math.max(0, Date.parse(finishedAt ?? new Date(now).toISOString()) - Date.parse(startedAt));
+}
+
+export function withElapsed(state: RunState): RunState {
+  const arms = Object.fromEntries(Object.entries(state.arms).map(([name, arm]) => [name, {
+    ...arm,
+    elapsedMs: elapsedMs(arm.startedAt, arm.finishedAt),
+  }]));
+  return {...state, elapsedMs: elapsedMs(state.startedAt ?? state.createdAt, state.finishedAt), arms};
 }
