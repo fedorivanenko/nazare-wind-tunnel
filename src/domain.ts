@@ -1,6 +1,21 @@
-export type Arm = 'raw' | 'nazare';
+export type Arm = string;
 export type RunLifecycle = 'queued' | 'preparing' | 'running' | 'verifying' | 'completed' | 'failed' | 'cancelled';
 export type RunOutcome = 'pass' | 'fail' | 'inconclusive' | null;
+export type FailureKind =
+  | 'worker_environment'
+  | 'source_checkout'
+  | 'dependency_install'
+  | 'environment_compile'
+  | 'agent_harness'
+  | 'model_provider'
+  | 'verification_infrastructure'
+  | 'unknown';
+
+export type EnvironmentSpec = {
+  compiler: 'none' | 'nazare' | string;
+  version: string;
+  config?: Record<string, unknown>;
+};
 
 export type VerificationSpec = {
   id: string;
@@ -20,7 +35,8 @@ export type ExperimentDefinition = {
     thinking?: string;
     timeoutMs?: number;
   };
-  nazare: {capabilityId: string; requestedChange: string};
+  environments?: Record<string, EnvironmentSpec>;
+  nazare?: {capabilityId: string; requestedChange: string};
   verification: Array<string | Partial<VerificationSpec> & Pick<VerificationSpec, 'command'>>;
 };
 
@@ -44,6 +60,7 @@ export type RunSpec = {
     path: string;
   };
   arms: Arm[];
+  environments: Record<string, EnvironmentSpec>;
   agent: {
     harness: string;
     package: string | null;
@@ -53,6 +70,9 @@ export type RunSpec = {
     timeoutMs: number;
   };
   verification: VerificationSpec[];
+  execution: {
+    workerImageDigest: string;
+  };
   controls: {
     subjectSource: 'identical';
     evaluator: 'immutable';
@@ -60,7 +80,8 @@ export type RunSpec = {
     harness: 'identical';
     model: 'identical';
     provider: 'identical';
-    independentVariable: 'contextCompiler';
+    workerImage: 'identical';
+    independentVariable: 'environmentCompiler';
   };
   createdAt: string;
 };
@@ -73,6 +94,7 @@ export type ArmState = {
   finishedAt: string | null;
   elapsedMs: number;
   error: string | null;
+  failureKind: FailureKind | null;
   workspaceBaselineCommit: string | null;
 };
 
@@ -86,6 +108,7 @@ export type RunState = {
   updatedAt: string;
   elapsedMs: number;
   error: string | null;
+  failureKind: FailureKind | null;
   workerId: string | null;
   leaseUntil: string | null;
   attempts: number;
@@ -125,6 +148,18 @@ export type VerificationResult = {
   stderrArtifact: string | null;
 };
 
+export function defaultEnvironments(definition: ExperimentDefinition): Record<string, EnvironmentSpec> {
+  if (definition.environments && Object.keys(definition.environments).length) return definition.environments;
+  return {
+    raw: {compiler: 'none', version: '1'},
+    nazare: {
+      compiler: 'nazare',
+      version: 'registry-projection-v1',
+      config: definition.nazare ? {...definition.nazare} : {},
+    },
+  };
+}
+
 export function normalizeVerification(definition: ExperimentDefinition): VerificationSpec[] {
   return definition.verification.map((item, index) => {
     if (typeof item === 'string') {
@@ -147,7 +182,13 @@ export function elapsedMs(startedAt: string | null, finishedAt: string | null, n
 export function withElapsed(state: RunState): RunState {
   const arms = Object.fromEntries(Object.entries(state.arms).map(([name, arm]) => [name, {
     ...arm,
+    failureKind: arm.failureKind ?? null,
     elapsedMs: elapsedMs(arm.startedAt, arm.finishedAt),
   }]));
-  return {...state, elapsedMs: elapsedMs(state.startedAt ?? state.createdAt, state.finishedAt), arms};
+  return {
+    ...state,
+    failureKind: state.failureKind ?? null,
+    elapsedMs: elapsedMs(state.startedAt ?? state.createdAt, state.finishedAt),
+    arms,
+  };
 }
