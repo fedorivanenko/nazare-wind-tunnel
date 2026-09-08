@@ -174,6 +174,27 @@ export function normalizeVerification(definition: ExperimentDefinition): Verific
   });
 }
 
+export function deriveRunLifecycle(state: Pick<RunState, 'arms'>): RunLifecycle {
+  const arms = Object.values(state.arms);
+  const allTerminal = arms.length > 0 && arms.every(arm => ['completed', 'failed', 'cancelled'].includes(arm.status));
+  if (allTerminal) {
+    if (arms.some(arm => arm.status === 'failed')) return 'failed';
+    if (arms.some(arm => arm.status === 'cancelled')) return 'cancelled';
+    return 'completed';
+  }
+  if (arms.some(arm => arm.status === 'verifying')) return 'verifying';
+  if (arms.some(arm => arm.status === 'running')) return 'running';
+  return 'preparing';
+}
+
+export function deriveRunOutcome(state: Pick<RunState, 'arms'>): RunOutcome {
+  const arms = Object.values(state.arms);
+  if (!arms.length || !arms.every(arm => arm.status === 'completed')) return null;
+  if (arms.some(arm => arm.outcome === 'fail')) return 'fail';
+  if (arms.some(arm => arm.outcome === 'inconclusive')) return 'inconclusive';
+  return 'pass';
+}
+
 export function elapsedMs(startedAt: string | null, finishedAt: string | null, now = Date.now()) {
   if (!startedAt) return 0;
   return Math.max(0, Date.parse(finishedAt ?? new Date(now).toISOString()) - Date.parse(startedAt));

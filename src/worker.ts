@@ -3,7 +3,7 @@ import {spawn} from 'node:child_process';
 import {mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {putArtifact} from './artifact-store';
-import {type Arm, type EnvironmentSpec, type ExperimentDefinition, type FailureKind, type RunLifecycle, type RunState, type VerificationResult} from './domain';
+import {deriveRunLifecycle, deriveRunOutcome, type Arm, type EnvironmentSpec, type ExperimentDefinition, type FailureKind, type RunState, type VerificationResult} from './domain';
 import {appendEvent, claimNextRun, ensureSchema, renewLease, saveRunState} from './postgres-store';
 import {runPi} from './pi-adapter';
 
@@ -95,24 +95,10 @@ async function preflight() {
   const requiredEnv = ['DATABASE_URL', 'WIND_TUNNEL_S3_BUCKET', 'WIND_TUNNEL_S3_ENDPOINT', 'WIND_TUNNEL_S3_ACCESS_KEY', 'WIND_TUNNEL_S3_SECRET_KEY'];
   const missing = requiredEnv.filter(name => !process.env[name]);
   if (missing.length) throw new InfrastructureError('worker_environment', `Missing worker configuration: ${missing.join(', ')}`);
+  if (!process.env.AI_GATEWAY_API_KEY && !process.env.VERCEL_AI_GATEWAY_API_KEY) {
+    throw new InfrastructureError('worker_environment', 'Missing worker configuration: AI_GATEWAY_API_KEY or VERCEL_AI_GATEWAY_API_KEY');
+  }
   return versions;
-}
-
-function deriveLifecycle(state: RunState): RunLifecycle {
-  const arms = Object.values(state.arms);
-  if (arms.some(arm => arm.status === 'failed')) return 'failed';
-  if (arms.length > 0 && arms.every(arm => arm.status === 'completed')) return 'completed';
-  if (arms.some(arm => arm.status === 'running')) return 'running';
-  if (arms.some(arm => arm.status === 'verifying')) return 'verifying';
-  return 'preparing';
-}
-
-function deriveOutcome(state: RunState) {
-  const arms = Object.values(state.arms);
-  if (!arms.length || !arms.every(arm => arm.status === 'completed')) return null;
-  if (arms.some(arm => arm.outcome === 'fail')) return 'fail' as const;
-  if (arms.some(arm => arm.outcome === 'inconclusive')) return 'inconclusive' as const;
-  return 'pass' as const;
 }
 
 function buildPrompt(task: string, environment: EnvironmentSpec, compiled: CompiledEnvironment) {
@@ -255,8 +241,8 @@ async function executeRun(claimed: RunState) {
   const mutate = async (fn: (current: RunState) => RunState, event?: Parameters<typeof appendEvent>[0]) => {
     persistChain = persistChain.then(async () => {
       state = fn(state);
-      state.status = deriveLifecycle(state);
-      state.outcome = deriveOutcome(state);
+      state.status = deriveRunLifecycle(state);
+      state.outcome = deriveRunOutcome(state);
       state.finishedAt = ['completed', 'failed', 'cancelled'].includes(state.status) ? (state.finishedAt ?? new Date().toISOString()) : null;
       state = await saveRunState(state);
       if (event) await appendEvent(event);

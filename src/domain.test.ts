@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {defaultEnvironments, normalizeVerification, type RunSpec} from './domain';
+import {deriveRunLifecycle, defaultEnvironments, normalizeVerification, type ArmState, type RunSpec} from './domain';
 
 test('normalizes string and object verification entries', () => {
   const checks = normalizeVerification({
@@ -70,4 +70,22 @@ test('RunSpec freezes evaluator, subject, worker image and environment independe
   assert.equal(spec.controls.workerImage, 'identical');
   assert.equal(spec.controls.independentVariable, 'environmentCompiler');
   assert.equal(spec.environments['nazare-projection-v1'].version, 'registry-projection-v1');
+});
+
+test('run remains active until every arm reaches a terminal state', () => {
+  const arm = (name: string, status: ArmState['status']): ArmState => ({
+    arm: name,
+    status,
+    outcome: null,
+    startedAt: null,
+    finishedAt: null,
+    elapsedMs: 0,
+    error: null,
+    failureKind: null,
+    workspaceBaselineCommit: null,
+  });
+  const state = {arms: {raw: arm('raw', 'failed'), nazare: arm('nazare', 'running')}};
+  assert.equal(deriveRunLifecycle(state), 'running');
+  state.arms.nazare.status = 'failed';
+  assert.equal(deriveRunLifecycle(state), 'failed');
 });
