@@ -13,6 +13,5 @@ RUN npm install --include=dev \
 COPY . .
 
 ENV WIND_TUNNEL_WORKSPACE=/workspace
-VOLUME ["/workspace"]
 
 CMD ["npm", "start"]
