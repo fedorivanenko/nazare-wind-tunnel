@@ -7,11 +7,12 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY package.json ./
-RUN npm install --include=dev \
-  && npx --yes @earendil-works/pi-coding-agent@0.85.1 --version >/dev/null
+RUN npm install --include=dev --ignore-scripts \
+  && ./node_modules/.bin/pi --version >/dev/null
 
 COPY . .
 
 ENV WIND_TUNNEL_WORKSPACE=/workspace
+ENV WIND_TUNNEL_PI_BIN=/app/node_modules/.bin/pi
 
 CMD ["npm", "start"]
