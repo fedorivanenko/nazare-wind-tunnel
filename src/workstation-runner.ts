@@ -13,7 +13,7 @@ const TARGET_REPO = process.env.WIND_TUNNEL_TARGET_REPO ?? 'fedorivanenko/nazare
 const TARGET_SHA = process.env.WIND_TUNNEL_TARGET_SHA ?? '';
 const ENV_REPO = process.env.WIND_TUNNEL_ENV_REPO ?? 'fedorivanenko/nazare-wind-tunnel';
 const DEFAULT_ENV_REF = process.env.WIND_TUNNEL_ENV_REF ?? 'env/current';
-const PI_PACKAGE = process.env.WIND_TUNNEL_PI_PACKAGE ?? '@earendil-works/pi-coding-agent@0.85.1';
+const PI_BIN = process.env.WIND_TUNNEL_PI_BIN ?? path.join(APP_DIR, 'node_modules', '.bin', 'pi');
 const BENCHMARK_CONFIG = process.env.WIND_TUNNEL_BENCHMARK_CONFIG ?? path.join(APP_DIR, 'benchmark', 'config.json');
 
 type Budget = {maxSeconds: number; maxToolCalls: number; maxTotalTokens: number | null};
@@ -162,8 +162,9 @@ function inspectEvent(event: unknown, usage: Usage) {
 }
 
 async function runPi(prompt: string, config: BenchmarkConfig) {
+  if (!existsSync(PI_BIN)) throw new Error(`Pi executable not found at ${PI_BIN}`);
   const usage: Usage = {toolCalls: 0, inputTokens: null, outputTokens: null, totalTokens: null};
-  const args = ['--yes', PI_PACKAGE, '--mode', 'json', '-p', '--no-session', '--no-approve'];
+  const args = ['--mode', 'json', '-p', '--no-session', '--no-approve'];
   if (config.model.provider) args.push('--provider', config.model.provider);
   args.push('--model', config.model.id);
   if (config.model.thinking) args.push('--thinking', config.model.thinking);
@@ -172,7 +173,7 @@ async function runPi(prompt: string, config: BenchmarkConfig) {
 
   const started = Date.now();
   return await new Promise<{exitCode: number | null; stdout: string; stderr: string; durationMs: number; budgetExceeded: boolean; budgetReason: string | null; usage: Usage}>((resolve, reject) => {
-    const child = spawn('npx', args, {cwd: TARGET_DIR, env: {...process.env, PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0'}});
+    const child = spawn(PI_BIN, args, {cwd: TARGET_DIR, env: {...process.env, PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0'}});
     let stdout = '';
     let stderr = '';
     let buffer = '';
@@ -228,10 +229,12 @@ async function verify(checkers: Checker[]) {
 }
 
 export async function prepareWorkspace() {
+  if (!existsSync(PI_BIN)) throw new Error(`Pi executable not found at ${PI_BIN}`);
   await mkdir(RUNS_DIR, {recursive: true});
   await ensureClone(ENV_DIR, ENV_REPO);
   await resetTarget();
   await ensureTargetDependencies();
+  await resolveRef(ENV_DIR, DEFAULT_ENV_REF);
   return workspaceStatus();
 }
 
@@ -239,7 +242,7 @@ export async function workspaceStatus() {
   const targetHead = existsSync(path.join(TARGET_DIR, '.git')) ? (await exec('git', ['rev-parse', 'HEAD'], TARGET_DIR, 30_000)).stdout.trim() : null;
   const environmentHead = existsSync(path.join(ENV_DIR, '.git')) ? (await exec('git', ['rev-parse', 'HEAD'], ENV_DIR, 30_000)).stdout.trim() : null;
   const config = existsSync(BENCHMARK_CONFIG) ? await benchmarkConfig() : null;
-  return {workspace: ROOT, target: {repository: TARGET_REPO, frozenSha: TARGET_SHA || null, checkedOutSha: targetHead, prepared: existsSync(path.join(TARGET_DIR, 'node_modules'))}, environment: {repository: ENV_REPO, defaultRef: DEFAULT_ENV_REF, checkedOutSha: environmentHead}, benchmark: config, runsDir: RUNS_DIR};
+  return {workspace: ROOT, pi: {binary: PI_BIN, available: existsSync(PI_BIN)}, target: {repository: TARGET_REPO, frozenSha: TARGET_SHA || null, checkedOutSha: targetHead, prepared: existsSync(path.join(TARGET_DIR, 'node_modules'))}, environment: {repository: ENV_REPO, defaultRef: DEFAULT_ENV_REF, checkedOutSha: environmentHead}, benchmark: config, runsDir: RUNS_DIR};
 }
 
 export async function runTest(environmentRef = DEFAULT_ENV_REF): Promise<RunSummary> {
