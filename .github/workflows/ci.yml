@@ -16,9 +16,11 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run typecheck
-      - name: Verify trust boundary
+      - name: Verify Wind Tunnel controls
         run: |
-          grep -q "subjectSha" README.md
-          grep -q "evaluatorSha" README.md
-          grep -q "independentVariable: 'contextCompiler'" src/domain.ts
-          grep -q "git fetch --depth 1 origin" src/worker.ts
+          grep -q 'WIND_TUNNEL_TARGET_SHA' README.md
+          grep -q 'maxSeconds' benchmark/config.json
+          grep -q 'maxToolCalls' benchmark/config.json
+          grep -q 'environment/' README.md
+          grep -q 'budget_exceeded' src/workstation-runner.ts
+          grep -q 'run_test' src/workstation-mcp.ts
