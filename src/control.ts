@@ -355,13 +355,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL) {
   if (url.pathname === '/api/runs') return json(res, 200, await listRuns(Number(url.searchParams.get('limit') ?? 50)));
   if (url.pathname === '/api/experiments') return json(res, 200, await listExperiments());
   const match = url.pathname.match(/^\/api\/runs\/([0-9a-f-]+)$/i);
-  if (match) return json(res, 200, await getRunView(match[1]));
+  if (match) {
+    try { return json(res, 200, await getRunView(match[1])); }
+    catch (error) {
+      if (error instanceof Error && error.message.startsWith('Run not found:')) return json(res, 404, {error: 'not_found'});
+      throw error;
+    }
+  }
   return json(res, 404, {error: 'not_found'});
 }
 
 await ensureSchema();
 
-createServer(async (req, res) => {
+async function handleRequest(req: IncomingMessage, res: ServerResponse) {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
   if (url.pathname === '/health') {
     try { json(res, 200, {ok: true, ...(await workspaceStatus())}); }
@@ -372,6 +378,14 @@ createServer(async (req, res) => {
   if (url.pathname.startsWith('/api/')) { await handleApi(req, res, url); return; }
   res.statusCode = 404;
   res.end();
+}
+
+createServer((req, res) => {
+  void handleRequest(req, res).catch(error => {
+    if (!res.headersSent) json(res, 500, {error: 'internal_error'});
+    else res.destroy(error instanceof Error ? error : new Error(String(error)));
+    console.error('Request failed', error);
+  });
 }).listen(PORT, '0.0.0.0', () => {
   console.log(`Nazare Wind Tunnel control v3 listening on ${PORT}`);
   console.log(`Evaluator: ${EVALUATOR_REPO}@${EVALUATOR_SHA}`);
