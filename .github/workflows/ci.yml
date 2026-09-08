@@ -16,6 +16,12 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run typecheck
+      - name: Verify production entrypoint
+        run: |
+          node -e "const p=require('./package.json'); if (p.scripts?.start !== 'tsx src/workstation-mcp.ts') process.exit(1)"
+          grep -q 'CMD \["npm", "start"\]' Dockerfile.control
+      - name: Build production container
+        run: docker build -f Dockerfile.control -t nazare-wind-tunnel:ci .
       - name: Verify Wind Tunnel controls
         run: |
           grep -q 'WIND_TUNNEL_TARGET_SHA' README.md
