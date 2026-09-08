@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: wind_tunnel
+      POSTGRES_PASSWORD: wind_tunnel
+      POSTGRES_DB: wind_tunnel
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wind_tunnel -d wind_tunnel"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "54329:5432"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: windtunnel
+      MINIO_ROOT_PASSWORD: windtunnel-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: /bin/sh
+    command:
+      - -lc
+      - |
+        until mc alias set local http://minio:9000 windtunnel windtunnel-secret; do sleep 1; done
+        mc mb --ignore-existing local/wind-tunnel
+
+  control:
+    build:
+      context: .
+      dockerfile: Dockerfile.control
+    command: npm run control
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment: &wind-tunnel-env
+      DATABASE_URL: postgresql://wind_tunnel:wind_tunnel@postgres:5432/wind_tunnel
+      WIND_TUNNEL_TOKEN: local-wind-tunnel-token
+      WIND_TUNNEL_EVALUATOR_SHA: local
+      WIND_TUNNEL_WORKER_IMAGE_DIGEST: local-dev
+      WIND_TUNNEL_S3_BUCKET: wind-tunnel
+      WIND_TUNNEL_S3_ENDPOINT: http://minio:9000
+      WIND_TUNNEL_S3_REGION: us-east-1
+      WIND_TUNNEL_S3_ACCESS_KEY: windtunnel
+      WIND_TUNNEL_S3_SECRET_KEY: windtunnel-secret
+      WIND_TUNNEL_S3_FORCE_PATH_STYLE: "1"
+      WIND_TUNNEL_SUBJECT_REPO: fedorivanenko/nazare-hydrogen
+      WIND_TUNNEL_SUBJECT_REF: main
+    ports:
+      - "3001:3001"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *wind-tunnel-env
+      WIND_TUNNEL_WORKER_ID: local-worker
+      VERCEL_AI_GATEWAY_API_KEY: ${VERCEL_AI_GATEWAY_API_KEY:-}
