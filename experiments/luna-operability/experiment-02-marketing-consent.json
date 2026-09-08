@@ -7,9 +7,19 @@
     "thinking": "low",
     "timeoutMs": 900000
   },
-  "nazare": {
-    "capabilityId": "capability.collect-email-subscribers",
-    "requestedChange": "Require explicit marketing consent before newsletter signup"
+  "environments": {
+    "raw": {
+      "compiler": "none",
+      "version": "1"
+    },
+    "nazare-projection-v1": {
+      "compiler": "nazare",
+      "version": "registry-projection-v1",
+      "config": {
+        "capabilityId": "capability.collect-email-subscribers",
+        "requestedChange": "Require explicit marketing consent before newsletter signup"
+      }
+    }
   },
   "verification": [
     "npm run lint",
