@@ -1,12 +1,11 @@
 {
   "name": "nazare-wind-tunnel",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
-    "gateway": "tsx src/oauth-gateway.ts",
-    "control": "tsx src/control.ts",
-    "worker": "tsx src/worker.ts",
+    "start": "tsx src/workstation-mcp.ts",
+    "mcp": "tsx src/workstation-mcp.ts",
     "test": "tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
