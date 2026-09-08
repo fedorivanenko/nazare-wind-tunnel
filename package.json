@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "gateway": "tsx src/oauth-gateway.ts",
     "control": "tsx src/control.ts",
     "worker": "tsx src/worker.ts",
     "test": "tsx --test src/*.test.ts",
