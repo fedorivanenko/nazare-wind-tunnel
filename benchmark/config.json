@@ -1,0 +1,53 @@
+{
+  "taskFile": "benchmark/task.md",
+  "environmentPromptFile": "prompt.md",
+  "model": {
+    "provider": "vercel-ai-gateway",
+    "id": "openai/gpt-oss-20b",
+    "thinking": "low"
+  },
+  "budget": {
+    "maxSeconds": 90,
+    "maxToolCalls": 12,
+    "maxTotalTokens": 12000
+  },
+  "tools": ["read", "grep", "find", "ls", "bash", "edit", "write"],
+  "checkers": [
+    {
+      "id": "task-consent-input",
+      "command": "git grep -q 'marketingConsent'",
+      "timeoutSeconds": 10,
+      "required": true
+    },
+    {
+      "id": "task-consent-policy",
+      "command": "git grep -q 'marketing-consent'",
+      "timeoutSeconds": 10,
+      "required": true
+    },
+    {
+      "id": "lint",
+      "command": "npm run lint",
+      "timeoutSeconds": 120,
+      "required": true
+    },
+    {
+      "id": "test",
+      "command": "npm test",
+      "timeoutSeconds": 120,
+      "required": true
+    },
+    {
+      "id": "typecheck",
+      "command": "npm run typecheck",
+      "timeoutSeconds": 120,
+      "required": true
+    },
+    {
+      "id": "build",
+      "command": "npm run build",
+      "timeoutSeconds": 180,
+      "required": true
+    }
+  ]
+}
