@@ -143,7 +143,7 @@ export async function runPi(options: PiRunOptions) {
   await mkdir(reportDirectory,{recursive:true});
   const reportOptions=`--report-on-signal --report-signal=SIGUSR2 --report-directory=${reportDirectory} --report-filename=${reportFilename}`;
   return await new Promise<{pid:number|null; exitCode:number|null; signal:NodeJS.Signals|null; stdout:string; stderr:string; stdoutBytes:number; stderrBytes:number; diagnosticReport:string|null; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
-    const child = spawn(piBin, args, {cwd: options.cwd, env: {...process.env, NODE_OPTIONS:[process.env.NODE_OPTIONS,reportOptions].filter(Boolean).join(' '),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'}});
+    const child = spawn(piBin, args, {cwd:options.cwd,stdio:['ignore','pipe','pipe'],env:{...process.env,NODE_OPTIONS:[process.env.NODE_OPTIONS,reportOptions].filter(Boolean).join(' '),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'}});
     let stdout = '';
     let stderr = '';
     let stdoutBytes = 0;
