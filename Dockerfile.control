@@ -1,18 +1,14 @@
 FROM node:24-bookworm-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git \
-  && rm -rf /var/lib/apt/lists/*
+  && apt-get install -y --no-install-recommends ca-certificates git postgresql-client \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable \
+  && corepack prepare pnpm@10.17.1 --activate
 
 WORKDIR /app
-
-COPY package.json ./
-RUN npm install --include=dev --ignore-scripts \
-  && ./node_modules/.bin/pi --version >/dev/null
-
 COPY . .
+RUN pnpm install --no-frozen-lockfile
 
-ENV WIND_TUNNEL_WORKSPACE=/workspace
-ENV WIND_TUNNEL_PI_BIN=/app/node_modules/.bin/pi
-
-CMD ["npm", "start"]
+ENV NODE_ENV=production
+CMD ["pnpm", "api"]
