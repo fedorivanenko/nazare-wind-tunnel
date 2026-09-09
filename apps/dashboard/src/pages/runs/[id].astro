@@ -34,6 +34,65 @@ const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
     const agentBudget = () => {const start=find('agent.started');if(!start)return null;const end=state.events.find((e)=>['agent.completed','agent.timeout','run.cancelled'].includes(e.type));const elapsed=(end?eventTime(end):Date.now())-eventTime(start);const budget=state.run.spec.agent.timeoutMs||30000;return {elapsed,budget,remaining:Math.max(0,budget-elapsed),pct:Math.min(100,Math.max(0,elapsed/budget*100))};};
     const workerHealth = () => terminal.has(state.run.status)||!state.run.workerId?'—':Date.parse(state.run.leaseUntil||0)>Date.now()?'healthy':'stale';
     const eventLine = (e) => {let detail='';if(e.data?.text)detail='  '+String(e.data.text).replace(/\s+/g,' ').slice(0,500);else if(e.data&&Object.keys(e.data).length)detail='  '+JSON.stringify(e.data).slice(0,500);return new Date(e.at).toLocaleTimeString()+'  '+e.type+detail;};
+
+    const safeJson = (text) => {try{return JSON.parse(text)}catch{return null}};
+    const textFromContent = (value) => {
+      if(typeof value==='string') return value;
+      if(Array.isArray(value)) return value.map(textFromContent).filter(Boolean).join('');
+      if(!value||typeof value!=='object') return '';
+      if(typeof value.text==='string') return value.text;
+      if(typeof value.delta==='string') return value.delta;
+      if(value.content!=null) return textFromContent(value.content);
+      return '';
+    };
+    const toolSummary = (obj) => {
+      const name=obj.toolName||obj.tool_name||obj.name||obj.tool?.name||obj.message?.name||'tool';
+      const args=obj.args??obj.arguments??obj.input??obj.tool?.input??obj.data?.input;
+      if(args==null)return String(name);
+      const value=typeof args==='string'?args:JSON.stringify(args);
+      return String(name)+'\n'+value;
+    };
+    function conversationItems(events){
+      const items=[];
+      let partial=null;
+      const push=(item)=>{
+        if(!item?.text)return;
+        const previous=items.at(-1);
+        if(previous&&previous.role===item.role&&previous.kind==='message'&&item.kind==='message'&&Math.abs(Date.parse(item.at)-Date.parse(previous.at))<3000){previous.text+=item.text;previous.partial=previous.partial||item.partial;return;}
+        items.push(item);
+      };
+      for(const event of events){
+        if(event.type==='agent.user_message'){push({kind:'message',role:'user',text:String(event.data?.text||''),at:event.at});continue;}
+        if(event.type==='agent.message'){push({kind:'message',role:String(event.data?.role||'assistant'),text:String(event.data?.text||''),at:event.at});continue;}
+        if(event.type==='agent.tool.started'){push({kind:'tool',role:'tool',text:String(event.data?.summary||event.data?.name||'tool'),at:event.at});continue;}
+        if(event.type==='agent.tool.completed'){const suffix=event.data?.error?'\nERROR: '+event.data.error:event.data?.result?'\n'+String(event.data.result).slice(0,2000):'';push({kind:'tool',role:'tool',text:String(event.data?.summary||event.data?.name||'tool')+suffix,at:event.at});continue;}
+        if(event.type==='agent.stderr'){push({kind:'stderr',role:'stderr',text:String(event.data?.text||''),at:event.at});continue;}
+        if(event.type!=='agent.output')continue;
+        const raw=String(event.data?.text||'');
+        const obj=safeJson(raw);
+        if(!obj)continue;
+        const type=String(obj.type||obj.event||'').toLowerCase();
+        if(type==='message_end'||type==='message'){const msg=obj.message||obj;const role=String(msg.role||obj.role||'assistant');const text=textFromContent(msg.content??obj.content??obj.text);if(text){partial=null;push({kind:'message',role,text,at:event.at});}continue;}
+        if(type==='message_update'){
+          const delta=obj.assistantMessageEvent?.delta??obj.delta?.text??obj.delta??obj.text;
+          const text=textFromContent(delta);
+          if(text){if(!partial){partial={kind:'message',role:'assistant',text:'',at:event.at,partial:true};items.push(partial)}partial.text+=text;}
+          continue;
+        }
+        if(type.includes('tool_execution_start')||type.includes('tool_call_start')||type==='tool_call'||type==='tool_use'){partial=null;push({kind:'tool',role:'tool',text:toolSummary(obj),at:event.at});continue;}
+        if(type.includes('tool_execution_end')||type.includes('tool_call_end')||type==='tool_result'){partial=null;const result=textFromContent(obj.result??obj.output??obj.content);push({kind:'tool',role:'tool',text:toolSummary(obj)+(result?'\n'+result.slice(0,2000):''),at:event.at});continue;}
+        const role=String(obj.role||obj.message?.role||obj.data?.role||'');
+        const text=textFromContent(obj.message?.content??obj.content??obj.data?.content??obj.text);
+        if((role==='assistant'||role==='user')&&text){partial=null;push({kind:'message',role,text,at:event.at});}
+      }
+      return items;
+    }
+    const conversationHtml = () => {
+      const items=conversationItems(state.events);
+      if(!items.length)return '<div class="conversation-empty">No agent messages captured yet. Raw run events are still available below.</div>';
+      return items.map((item)=>'<div class="message '+esc(item.role)+(item.partial?' partial':'')+'"><div class="message-head"><span class="role">'+esc(item.role)+(item.partial?' · live':'')+'</span><span class="time">'+new Date(item.at).toLocaleTimeString()+'</span></div><div class="body">'+esc(item.text)+'</div></div>').join('');
+    };
+
     function render(){
       if(!state.run)return;
       const r=state.run,b=agentBudget(),health=workerHealth();
@@ -41,9 +100,9 @@ const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
       const phaseHtml=phases.map(([name,ms])=>'<div class="phase"><span>'+name+'</span><strong>'+fmt(ms)+'</strong></div>').join('');
       const artifactHtml=state.artifacts.length?state.artifacts.map((a)=>'<div class="artifact"><strong>'+esc(a.type)+'</strong><div class="muted">'+esc(a.key)+' · '+a.bytes+' bytes</div></div>').join(''):'<div class="muted">No artifacts yet</div>';
       const timeline=state.events.length?state.events.map(eventLine).join('\n'):'No events yet';
-      document.querySelector('#app').innerHTML='<div class="stack"><div class="card"><div class="row"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="pill">'+esc(r.spec.arm)+'</span></div><strong>'+fmt(r.elapsedMs)+'</strong></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.experiment.path)+'</div>'+(b?'<h2 style="margin-top:18px">Model budget</h2><div class="row"><span>'+fmt(b.elapsed)+' / '+fmt(b.budget)+'</span><span>'+fmt(b.remaining)+' remaining</span></div><div class="progress" style="margin-top:8px"><span style="width:'+b.pct+'%"></span></div>':'')+(r.error?'<h2 style="margin-top:18px">Error</h2><div class="error"><strong>'+esc(r.errorCode||'error')+'</strong>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:16px"><button id="cancel" class="button danger">Cancel run</button></div>':'')+'</div><div class="grid"><div class="card"><h2>Execution</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+health+'">'+health+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span></div><h2 style="margin-top:18px">Phase timings</h2>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+artifactHtml+'</div></div><div class="card"><div class="row"><h2>Live activity</h2><span id="stream-state" class="pill">streaming</span></div><div id="timeline" class="timeline">'+esc(timeline)+'</div></div></div>';
+      document.querySelector('#app').innerHTML='<div class="stack"><div class="card"><div class="row"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="pill">'+esc(r.spec.arm)+'</span></div><strong>'+fmt(r.elapsedMs)+'</strong></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.experiment.path)+'</div>'+(b?'<h2 style="margin-top:18px">Model budget</h2><div class="row"><span>'+fmt(b.elapsed)+' / '+fmt(b.budget)+'</span><span>'+fmt(b.remaining)+' remaining</span></div><div class="progress" style="margin-top:8px"><span style="width:'+b.pct+'%"></span></div>':'')+(r.error?'<h2 style="margin-top:18px">Error</h2><div class="error"><strong>'+esc(r.errorCode||'error')+'</strong>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:16px"><button id="cancel" class="button danger">Cancel run</button></div>':'')+'</div><div class="grid"><div class="card"><h2>Execution</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+health+'">'+health+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span></div><h2 style="margin-top:18px">Phase timings</h2>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+artifactHtml+'</div></div><div class="card"><div class="row"><h2>Agent conversation</h2><span id="stream-state" class="pill">'+(terminal.has(r.status)?'finished':'streaming')+'</span></div><div class="section-note">Messages and tool activity reconstructed from the durable Pi event stream.</div><div id="conversation" class="conversation">'+conversationHtml()+'</div></div><details class="card"><summary style="cursor:pointer;font-weight:700">Raw event timeline</summary><div id="timeline" class="timeline" style="margin-top:12px">'+esc(timeline)+'</div></details></div>';
       document.querySelector('#cancel')?.addEventListener('click',async()=>{if(!confirm('Cancel this run?'))return;await fetch('/api/runs/'+id+'/cancel',{method:'POST'});await refresh();});
-      const timelineEl=document.querySelector('#timeline');if(timelineEl)timelineEl.scrollTop=timelineEl.scrollHeight;
+      const conversation=document.querySelector('#conversation');if(conversation)conversation.scrollTop=conversation.scrollHeight;
     }
     async function refresh(){
       const [runResponse,eventResponse,artifactResponse]=await Promise.all([fetch('/api/runs/'+id),fetch('/api/runs/'+id+'/events?limit=500'),fetch('/api/runs/'+id+'/artifacts')]);
