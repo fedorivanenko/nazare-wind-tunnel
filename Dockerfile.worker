@@ -14,4 +14,5 @@ RUN pnpm install --no-frozen-lockfile \
 ENV NODE_ENV=production
 ENV WIND_TUNNEL_WORKSPACE=/workspace
 ENV WIND_TUNNEL_PNPM_STORE=/workspace/pnpm-store
+ENV WIND_TUNNEL_PI_BIN=/app/packages/pi/node_modules/.bin/pi
 CMD ["pnpm", "worker"]
