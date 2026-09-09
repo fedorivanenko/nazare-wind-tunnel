@@ -26,7 +26,7 @@ function assertRepository(repository: string) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error(`Invalid GitHub repository: ${repository}`);
 }
 
-async function run(file: string, args: string[], cwd: string, timeoutMs = 10 * 60 * 1000): Promise<ProcessResult> {
+export async function runSubjectProcess(file: string, args: string[], cwd: string, timeoutMs = 10 * 60 * 1000): Promise<ProcessResult> {
   const started = Date.now();
   return await new Promise((resolve, reject) => {
     const child = spawn(file, args, {cwd, env: process.env});
@@ -74,24 +74,25 @@ async function writeState(state: SubjectState) {
 
 export async function ensureSubject(repository: string, githubSha: string) {
   assertRepository(repository);
-  if (!/^[0-9a-f]{40}$/i.test(githubSha)) throw new Error(`sourceSha must be a full 40-character commit SHA`);
+  if (!/^[0-9a-f]{40}$/i.test(githubSha)) throw new Error('sourceSha must be a full 40-character commit SHA');
   const cwd = subjectPath(repository);
   await mkdir(path.dirname(cwd), {recursive: true});
 
   if (!existsSync(path.join(cwd, '.git'))) {
-    await must(await run('git', ['clone', '--no-checkout', `https://github.com/${repository}.git`, cwd], path.dirname(cwd)), 'git clone');
+    await must(await runSubjectProcess('git', ['clone', '--no-checkout', `https://github.com/${repository}.git`, cwd], path.dirname(cwd)), 'git clone');
   }
 
-  await must(await run('git', ['fetch', '--prune', 'origin'], cwd), 'git fetch');
-  await must(await run('git', ['reset', '--hard', githubSha], cwd, 60_000), 'git reset');
-  await must(await run('git', ['clean', '-fdx', '-e', 'node_modules/'], cwd, 60_000), 'git clean');
-  const head = await must(await run('git', ['rev-parse', 'HEAD'], cwd, 30_000), 'git rev-parse');
+  await must(await runSubjectProcess('git', ['fetch', '--prune', 'origin'], cwd), 'git fetch');
+  await must(await runSubjectProcess('git', ['reset', '--hard', githubSha], cwd, 60_000), 'git reset');
+  await must(await runSubjectProcess('git', ['clean', '-fdx', '-e', 'node_modules/'], cwd, 60_000), 'git clean');
+  const head = await must(await runSubjectProcess('git', ['rev-parse', 'HEAD'], cwd, 30_000), 'git rev-parse');
   if (head.stdout.trim().toLowerCase() !== githubSha.toLowerCase()) throw new Error(`Subject SHA mismatch: ${head.stdout.trim()} != ${githubSha}`);
 
+  const previous = await readState(repository);
   await writeState({
     repository,
-    lockfileHash: (await readState(repository))?.lockfileHash ?? null,
-    installedAt: (await readState(repository))?.installedAt ?? null,
+    lockfileHash: previous?.lockfileHash ?? null,
+    installedAt: previous?.installedAt ?? null,
     lastUsedAt: new Date().toISOString(),
   });
   return {repository, githubSha, cwd};
@@ -111,7 +112,7 @@ export async function ensureDependencies(repository: string) {
   }
 
   await mkdir(PNPM_STORE_DIR, {recursive: true});
-  const result = await must(await run('pnpm', ['install', '--frozen-lockfile', '--store-dir', PNPM_STORE_DIR], cwd, 20 * 60 * 1000), 'pnpm install');
+  const result = await must(await runSubjectProcess('pnpm', ['install', '--frozen-lockfile', '--store-dir', PNPM_STORE_DIR], cwd, 20 * 60 * 1000), 'pnpm install');
   await writeState({repository, lockfileHash, installedAt: new Date().toISOString(), lastUsedAt: new Date().toISOString()});
   return {installed: true, reason: nodeModulesExists ? 'lockfile-changed' : 'dependencies-missing', lockfileHash, durationMs: result.durationMs};
 }
@@ -119,8 +120,8 @@ export async function ensureDependencies(repository: string) {
 export async function cleanSubject(repository: string) {
   const cwd = subjectPath(repository);
   if (!existsSync(path.join(cwd, '.git'))) return;
-  await run('git', ['reset', '--hard', 'HEAD'], cwd, 60_000);
-  await run('git', ['clean', '-fdx', '-e', 'node_modules/'], cwd, 60_000);
+  await runSubjectProcess('git', ['reset', '--hard', 'HEAD'], cwd, 60_000);
+  await runSubjectProcess('git', ['clean', '-fdx', '-e', 'node_modules/'], cwd, 60_000);
   await rm(path.join(cwd, '.nazare', 'task.json'), {force: true});
 }
 
