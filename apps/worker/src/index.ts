@@ -4,7 +4,7 @@ import {randomUUID} from 'node:crypto';
 import type {ExperimentDefinition, RunState, VerificationSpec} from '@nazare/wind-tunnel-domain';
 import {normalizeVerification} from '@nazare/wind-tunnel-domain';
 import {appendEvent, claimNextRun, ensureSchema, isCancellationRequested, putArtifact, renewLease, saveRun} from '@nazare/wind-tunnel-storage';
-import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, runSubjectProcess} from '@nazare/wind-tunnel-subject-manager';
+import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, inspectSubjectReadiness, runSubjectProcess} from '@nazare/wind-tunnel-subject-manager';
 import {runPi} from '@nazare/wind-tunnel-pi';
 
 const WORKER_ID = process.env.WIND_TUNNEL_WORKER_ID ?? `${process.env.RAILWAY_SERVICE_NAME ?? 'worker'}:${process.pid}:${randomUUID().slice(0,8)}`;
@@ -24,6 +24,13 @@ class AgentTimeoutError extends Error {
   constructor() {
     super(`Pi exceeded hard ${MAX_MODEL_TIMEOUT_MS}ms model budget`);
     this.name = 'AgentTimeoutError';
+  }
+}
+
+class PreflightError extends Error {
+  constructor(failures: string[]) {
+    super(`Subject preflight failed: ${failures.join('; ')}`);
+    this.name = 'PreflightError';
   }
 }
 
@@ -110,6 +117,20 @@ async function executeRun(claimed: RunState) {
     const task = await readFile(taskPath,'utf8');
     const checks = normalizeVerification(definition);
 
+    await appendEvent({runId:state.runId,type:'subject.preflight.started',at:new Date().toISOString()});
+    const preflight = await inspectSubjectReadiness({
+      repository,
+      expectedSha:sourceSha,
+      experimentPath:state.spec.experiment.path,
+      taskPath,
+      provider:state.spec.agent.provider,
+      dependenciesInstalled:deps.installed,
+    });
+    await putArtifact({runId:state.runId,type:'subject.preflight',name:'preflight.json',mediaType:'application/json',content:JSON.stringify(preflight,null,2)});
+    await appendEvent({runId:state.runId,type:'subject.preflight.completed',at:new Date().toISOString(),data:preflight});
+    if (!preflight.ok) throw new PreflightError(preflight.failures);
+    await assertNotCancelled(state.runId);
+
     await putArtifact({runId:state.runId,type:'run.spec',name:'run-spec.json',mediaType:'application/json',content:JSON.stringify(state.spec,null,2)});
     if (state.spec.arm === 'nazare') {
       state = await saveRun({...state,status:'compiling'});
@@ -126,7 +147,7 @@ async function executeRun(claimed: RunState) {
     const requestedTimeout = Number(state.spec.agent.timeoutMs || MAX_MODEL_TIMEOUT_MS);
     const modelTimeoutMs = Math.min(MAX_MODEL_TIMEOUT_MS, Math.max(1_000, requestedTimeout));
     state = await saveRun({...state,status:'running',error:null,errorCode:null,startedAt:state.startedAt ?? new Date().toISOString()});
-    await appendEvent({runId:state.runId,type:'agent.started',at:new Date().toISOString(),data:{timeoutMs:modelTimeoutMs,provider:state.spec.agent.provider,model:state.spec.agent.model,thinking:state.spec.agent.thinking}});
+    await appendEvent({runId:state.runId,type:'agent.started',at:new Date().toISOString(),data:{timeoutMs:modelTimeoutMs,provider:state.spec.agent.provider,model:state.spec.agent.model,thinking:state.spec.agent.thinking,preflight:true}});
 
     const controller = new AbortController();
     const cancellationWatcher = setInterval(() => {
@@ -163,11 +184,11 @@ async function executeRun(claimed: RunState) {
 
     if (agent.aborted) throw new RunCancelledError();
     if (agent.timedOut) {
-      await appendEvent({runId:state.runId,type:'agent.timeout',at:new Date().toISOString(),data:{timeoutMs:modelTimeoutMs}});
+      await appendEvent({runId:state.runId,type:'agent.timeout',at:new Date().toISOString(),data:{timeoutMs:modelTimeoutMs,stdoutBytes:Buffer.byteLength(agent.stdout),stderrBytes:Buffer.byteLength(agent.stderr)}});
       throw new AgentTimeoutError();
     }
     if (agent.exitCode !== 0) throw new Error(`Pi exited ${agent.exitCode}`);
-    await appendEvent({runId:state.runId,type:'agent.completed',at:new Date().toISOString(),data:{durationMs:agent.durationMs,exitCode:agent.exitCode}});
+    await appendEvent({runId:state.runId,type:'agent.completed',at:new Date().toISOString(),data:{durationMs:agent.durationMs,exitCode:agent.exitCode,stdoutBytes:Buffer.byteLength(agent.stdout),stderrBytes:Buffer.byteLength(agent.stderr)}});
     await assertNotCancelled(state.runId);
 
     const patch = await runSubjectProcess('git',['diff','--no-ext-diff','--binary',sourceSha,'--','.',' :(exclude).nazare/task.json'.trim()],cwd,60_000);
@@ -197,7 +218,7 @@ async function executeRun(claimed: RunState) {
       await appendEvent({runId:state.runId,type:'run.cancelled',at:finishedAt,data:{workerId:WORKER_ID}}).catch(() => {});
     } else {
       const message = error instanceof Error ? error.stack ?? error.message : String(error);
-      const errorCode = error instanceof AgentTimeoutError ? 'agent_timeout' : 'run_error';
+      const errorCode = error instanceof AgentTimeoutError ? 'agent_timeout' : error instanceof PreflightError ? 'preflight_failed' : 'run_error';
       state = await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});
       await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(() => {});
       await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(() => {});
