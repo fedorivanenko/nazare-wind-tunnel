@@ -28,7 +28,7 @@ async function compileNazare(cwd: string, definition: ExperimentDefinition) {
   if (!definition.nazare) throw new Error('nazare arm requires experiment.nazare configuration');
   await mkdir(path.join(cwd, '.nazare'), {recursive:true});
   const result = await runSubjectProcess('pnpm', [
-    'run','nazare:registry','--','compile',definition.nazare.capabilityId,definition.nazare.requestedChange,
+    'run','nazare:registry','compile',definition.nazare.capabilityId,definition.nazare.requestedChange,
   ], cwd, 60_000);
   if (result.exitCode !== 0 || result.timedOut) throw new Error(`Nazare compile failed: ${result.stderr || result.stdout}`);
   const jsonStart = result.stdout.indexOf('{');
