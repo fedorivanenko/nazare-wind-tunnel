@@ -84,6 +84,7 @@ async function executeRun(claimed:RunState){
   };
   const toolStarts=new Map<string,number>();
   const enqueueSemanticEvent=(type:string,data:Record<string,unknown>={})=>{
+    if(type==='agent.message.update'||type==='agent.pi'||type==='agent.tool.update')return;
     const toolCallId=typeof data.toolCallId==='string'?data.toolCallId:null;
     if(type==='agent.tool.started'&&toolCallId)toolStarts.set(toolCallId,Date.now());
     if(type==='agent.tool.completed'&&toolCallId){const started=toolStarts.get(toolCallId);if(started)data.durationMs=Date.now()-started;toolStarts.delete(toolCallId);}
