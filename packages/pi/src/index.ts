@@ -1,4 +1,8 @@
 import {spawn} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
+import {mkdir, readFile, rm} from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 export type PiRunOptions = {
   cwd: string;
@@ -15,12 +19,48 @@ export type PiRunOptions = {
   onSpawn?: (event: {pid:number; executable:string}) => void | Promise<void>;
   onFirstOutput?: (event: {pid:number; stream:'stdout'|'stderr'; afterMs:number}) => void | Promise<void>;
   onHeartbeat?: (event: {pid:number; runtimeMs:number; stdoutBytes:number; stderrBytes:number}) => void | Promise<void>;
-  onSignal?: (event: {pid:number; signal:'SIGTERM'|'SIGKILL'; reason:'startup'|'idle'|'overall'|'abort'}) => void | Promise<void>;
+  onSignal?: (event: {pid:number; signal:'SIGUSR2'|'SIGTERM'|'SIGKILL'; reason:'startup'|'idle'|'overall'|'abort'}) => void | Promise<void>;
   onError?: (event: {pid:number|null; error:string}) => void | Promise<void>;
   heartbeatMs?: number;
 };
 
 export type PiTimeoutReason = 'startup' | 'idle' | 'overall' | null;
+
+export type ProviderProbe = {
+  provider: string;
+  model: string;
+  ok: boolean;
+  skipped: boolean;
+  reachable: boolean;
+  authenticated: boolean;
+  modelAvailable: boolean;
+  status: number | null;
+  durationMs: number;
+  requestId: string | null;
+  error: string | null;
+};
+
+export async function probeProvider(provider:string,model:string,timeoutMs=5_000):Promise<ProviderProbe>{
+  const started=Date.now();
+  if(provider!=='vercel-ai-gateway')return {provider,model,ok:true,skipped:true,reachable:false,authenticated:false,modelAvailable:false,status:null,durationMs:0,requestId:null,error:null};
+  const apiKey=process.env.AI_GATEWAY_API_KEY??'';
+  if(!apiKey)return {provider,model,ok:false,skipped:false,reachable:false,authenticated:false,modelAvailable:false,status:null,durationMs:Date.now()-started,requestId:null,error:'AI_GATEWAY_API_KEY is missing'};
+  try{
+    const response=await fetch('https://ai-gateway.vercel.sh/v1/models',{headers:{authorization:`Bearer ${apiKey}`},signal:AbortSignal.timeout(Math.max(1_000,timeoutMs))});
+    const requestId=response.headers.get('x-request-id')??response.headers.get('x-vercel-id');
+    let modelAvailable=false;
+    let parseError:string|null=null;
+    if(response.ok){
+      try{const body=await response.json() as {data?:Array<{id?:string}>};modelAvailable=Boolean(body.data?.some(item=>item.id===model));}
+      catch(error){parseError=`Invalid models response: ${error instanceof Error?error.message:String(error)}`;}
+    }
+    const authenticated=response.status!==401&&response.status!==403;
+    return {provider,model,ok:response.ok&&modelAvailable,skipped:false,reachable:true,authenticated,modelAvailable,status:response.status,durationMs:Date.now()-started,requestId,error:response.ok?(parseError??(modelAvailable?null:`Model unavailable: ${model}`)):`Gateway returned HTTP ${response.status}`};
+  }catch(error){
+    const cause=error instanceof Error&&error.cause&&typeof error.cause==='object'?'code' in error.cause?String((error.cause as {code?:unknown}).code??''):null:null;
+    return {provider,model,ok:false,skipped:false,reachable:false,authenticated:false,modelAvailable:false,status:null,durationMs:Date.now()-started,requestId:null,error:[error instanceof Error?error.message:String(error),cause].filter(Boolean).join(' · ')};
+  }
+}
 
 export type PiSemanticEvent = {
   type: string;
@@ -90,7 +130,7 @@ export function normalizePiJsonLine(line: string): PiSemanticEvent[] {
 }
 
 export async function runPi(options: PiRunOptions) {
-  const args = ['--mode','json','-p','--no-session','--no-approve'];
+  const args = ['--mode','json','--verbose','-p','--no-session','--no-approve'];
   if (options.provider) args.push('--provider', options.provider);
   if (options.model) args.push('--model', options.model);
   if (options.thinking) args.push('--thinking', options.thinking);
@@ -98,8 +138,12 @@ export async function runPi(options: PiRunOptions) {
 
   const piBin = process.env.WIND_TUNNEL_PI_BIN ?? 'pi';
   const started = Date.now();
-  return await new Promise<{pid:number|null; exitCode:number|null; signal:NodeJS.Signals|null; stdout:string; stderr:string; stdoutBytes:number; stderrBytes:number; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
-    const child = spawn(piBin, args, {cwd: options.cwd, env: {...process.env, PI_SKIP_VERSION_CHECK:'1', PI_TELEMETRY:'0'}});
+  const reportDirectory=path.join(os.tmpdir(),`wind-tunnel-pi-${randomUUID()}`);
+  const reportFilename='node-diagnostic-report.json';
+  await mkdir(reportDirectory,{recursive:true});
+  const reportOptions=`--report-on-signal --report-signal=SIGUSR2 --report-directory=${reportDirectory} --report-filename=${reportFilename}`;
+  return await new Promise<{pid:number|null; exitCode:number|null; signal:NodeJS.Signals|null; stdout:string; stderr:string; stdoutBytes:number; stderrBytes:number; diagnosticReport:string|null; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
+    const child = spawn(piBin, args, {cwd: options.cwd, env: {...process.env, NODE_OPTIONS:[process.env.NODE_OPTIONS,reportOptions].filter(Boolean).join(' '),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'}});
     let stdout = '';
     let stderr = '';
     let stdoutBytes = 0;
@@ -110,28 +154,34 @@ export async function runPi(options: PiRunOptions) {
     let timeoutReason: PiTimeoutReason = null;
     let aborted = false;
     let settled = false;
+    let terminating = false;
     let firstOutputMs: number | null = null;
     let lastActivityAt: string | null = null;
     let idleTimer: NodeJS.Timeout | null = null;
 
     const notify = (callback: (() => void | Promise<void>) | undefined) => { if (callback) Promise.resolve(callback()).catch(() => {}); };
     const terminate = (reason: 'startup' | 'idle' | 'overall' | 'abort') => {
-      if (settled) return;
+      if (settled||terminating) return;
+      terminating=true;
       if (reason === 'abort') aborted = true;
       else {
         timedOut = true;
         timeoutReason = reason;
       }
       const pid=child.pid;
-      if (pid) notify(() => options.onSignal?.({pid,signal:'SIGTERM',reason}));
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!settled) {
-          const killPid=child.pid;
-          if (killPid) notify(() => options.onSignal?.({pid:killPid,signal:'SIGKILL',reason}));
-          child.kill('SIGKILL');
-        }
-      }, 2_000).unref();
+      if(pid&&reason!=='abort'){
+        notify(()=>options.onSignal?.({pid,signal:'SIGUSR2',reason}));
+        child.kill('SIGUSR2');
+      }
+      setTimeout(()=>{
+        if(settled)return;
+        const termPid=child.pid;
+        if(termPid)notify(()=>options.onSignal?.({pid:termPid,signal:'SIGTERM',reason}));
+        child.kill('SIGTERM');
+        setTimeout(()=>{
+          if(!settled){const killPid=child.pid;if(killPid)notify(()=>options.onSignal?.({pid:killPid,signal:'SIGKILL',reason}));child.kill('SIGKILL');}
+        },2_000).unref();
+      },reason==='abort'?0:100).unref();
     };
 
     const resetIdleTimer = () => {
@@ -142,6 +192,7 @@ export async function runPi(options: PiRunOptions) {
     };
 
     const noteActivity = (stream: 'stdout' | 'stderr') => {
+      if(terminating)return;
       if (firstOutputMs == null) {
         const afterMs=Date.now()-started;
         const pid=child.pid;
@@ -182,7 +233,7 @@ export async function runPi(options: PiRunOptions) {
       stderr = (stderr + text).slice(-20_000_000);
       emitLines('stderr', text);
     });
-    child.on('error', error => {notify(()=>options.onError?.({pid:child.pid??null,error:error.message}));reject(error);});
+    child.on('error', error => {void rm(reportDirectory,{recursive:true,force:true});notify(()=>options.onError?.({pid:child.pid??null,error:error.message}));reject(error);});
 
     const onAbort = () => terminate('abort');
     if (options.signal?.aborted) onAbort();
@@ -200,7 +251,7 @@ export async function runPi(options: PiRunOptions) {
     }, Math.max(1_000,options.heartbeatMs??5_000));
     heartbeat.unref();
 
-    child.on('close', (exitCode, signal) => {
+    child.on('close', async (exitCode, signal) => {
       settled = true;
       clearTimeout(overallTimer);
       clearInterval(heartbeat);
@@ -209,7 +260,9 @@ export async function runPi(options: PiRunOptions) {
       options.signal?.removeEventListener('abort', onAbort);
       if (stdoutBuffer && options.onStdoutLine) Promise.resolve(options.onStdoutLine(stdoutBuffer)).catch(() => {});
       if (stderrBuffer && options.onStderrLine) Promise.resolve(options.onStderrLine(stderrBuffer)).catch(() => {});
-      resolve({pid:child.pid??null,exitCode,signal,stdout,stderr,stdoutBytes,stderrBytes,durationMs:Date.now()-started,timedOut,timeoutReason,aborted,firstOutputMs,lastActivityAt});
+      const diagnosticReport=await readFile(path.join(reportDirectory,reportFilename),'utf8').catch(()=>null);
+      await rm(reportDirectory,{recursive:true,force:true}).catch(()=>{});
+      resolve({pid:child.pid??null,exitCode,signal,stdout,stderr,stdoutBytes,stderrBytes,diagnosticReport,durationMs:Date.now()-started,timedOut,timeoutReason,aborted,firstOutputMs,lastActivityAt});
     });
   });
 }

@@ -138,7 +138,17 @@ WIND_TUNNEL_WORKSPACE=/workspace
 WIND_TUNNEL_PNPM_STORE=/workspace/pnpm-store
 ```
 
-Model/provider credentials required by Pi also belong on the worker service.
+Model/provider credentials required by Pi also belong on the worker service. Vercel AI Gateway uses `AI_GATEWAY_API_KEY`.
+
+Optional observability configuration:
+
+```text
+WIND_TUNNEL_PROVIDER_PROBE_TIMEOUT_MS=5000
+WIND_TUNNEL_AGENT_STARTUP_TIMEOUT_MS=15000
+WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS=60000
+```
+
+Before Pi starts, the worker performs an authenticated provider/model probe. Worker lifecycle, subject commands and Pi process telemetry are emitted as structured JSON to Railway logs and persisted as run events. Timeout diagnostics include Pi stdout/stderr, `agent-diagnostics.json`, and a redacted Node diagnostic report when the Pi runtime can produce one.
 
 ## CI
 

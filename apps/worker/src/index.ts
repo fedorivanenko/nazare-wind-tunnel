@@ -5,18 +5,20 @@ import type {ExperimentDefinition, RunState, VerificationSpec} from '@nazare/win
 import {MAX_AGENT_TIMEOUT_MS, normalizeVerification, resolveExperimentAgent, validateExperimentDefinition} from '@nazare/wind-tunnel-domain';
 import {appendEvent, claimNextRun, ensureSchema, isCancellationRequested, putArtifact, renewLease, saveRun} from '@nazare/wind-tunnel-storage';
 import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, inspectSubjectReadiness, runSubjectProcess, type SubjectProcessObserver} from '@nazare/wind-tunnel-subject-manager';
-import {normalizePiJsonLine, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
+import {normalizePiJsonLine, probeProvider, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
 
 const WORKER_ID=process.env.WIND_TUNNEL_WORKER_ID??`${process.env.RAILWAY_SERVICE_NAME??'worker'}:${process.pid}:${randomUUID().slice(0,8)}`;
 const POLL_MS=Number(process.env.WIND_TUNNEL_POLL_MS??2_000);
 const HEARTBEAT_MS=Number(process.env.WIND_TUNNEL_HEARTBEAT_MS??5_000);
 const AGENT_STARTUP_TIMEOUT_MS=Number(process.env.WIND_TUNNEL_AGENT_STARTUP_TIMEOUT_MS??15_000);
 const AGENT_IDLE_TIMEOUT_MS=Number(process.env.WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS??60_000);
+const PROVIDER_PROBE_TIMEOUT_MS=Number(process.env.WIND_TUNNEL_PROVIDER_PROBE_TIMEOUT_MS??5_000);
 const CANCEL_POLL_MS=750;
 
 class RunCancelledError extends Error{constructor(){super('Run cancelled');this.name='RunCancelledError';}}
 class AgentTimeoutError extends Error{constructor(reason:PiTimeoutReason,timeoutMs:number){super(`Pi timed out (${reason??'unknown'}); overall budget ${timeoutMs}ms, startup ${AGENT_STARTUP_TIMEOUT_MS}ms, idle ${AGENT_IDLE_TIMEOUT_MS}ms`);this.name='AgentTimeoutError';}}
 class PreflightError extends Error{constructor(failures:string[]){super(`Subject preflight failed: ${failures.join('; ')}`);this.name='PreflightError';}}
+class ProviderPreflightError extends Error{constructor(message:string){super(`Provider preflight failed: ${message}`);this.name='ProviderPreflightError';}}
 class ExperimentConfigError extends Error{constructor(failures:string[]){super(`Experiment configuration invalid: ${failures.join('; ')}`);this.name='ExperimentConfigError';}}
 
 function logWorkerEvent(runId:string|null,event:string,data:Record<string,unknown>={}){
@@ -91,6 +93,13 @@ async function executeRun(claimed:RunState){
     if(!preflight.ok)throw new PreflightError(preflight.failures);
     await assertNotCancelled(state.runId);
 
+    await observedEvent('agent.provider_probe.started',{provider:resolvedAgent.provider,model:resolvedAgent.model,timeoutMs:PROVIDER_PROBE_TIMEOUT_MS});
+    const providerProbe=await probeProvider(resolvedAgent.provider,resolvedAgent.model,PROVIDER_PROBE_TIMEOUT_MS);
+    await putArtifact({runId:state.runId,type:'agent.provider-probe',name:'provider-probe.json',mediaType:'application/json',content:JSON.stringify(providerProbe,null,2)});
+    await observedEvent('agent.provider_probe.completed',providerProbe as unknown as Record<string,unknown>);
+    if(!providerProbe.ok)throw new ProviderPreflightError(providerProbe.error??'unknown provider failure');
+    await assertNotCancelled(state.runId);
+
     await putArtifact({runId:state.runId,type:'run.spec',name:'run-spec.json',mediaType:'application/json',content:JSON.stringify(state.spec,null,2)});
     if(state.spec.arm==='nazare'){
       state=await saveRun({...state,status:'compiling'});
@@ -127,15 +136,18 @@ async function executeRun(claimed:RunState){
     enqueueEvent('agent.process.exited',{pid:agent.pid,exitCode:agent.exitCode,signal:agent.signal,durationMs:agent.durationMs,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes},true);
     if(agent.timedOut)enqueueEvent('agent.timeout',{timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,timeoutReason:agent.timeoutReason,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes},true);
     await eventWrites;
-    const diagnostics={pid:agent.pid,spawned:agent.pid!==null,exitCode:agent.exitCode,signal:agent.signal,durationMs:agent.durationMs,timedOut:agent.timedOut,timeoutReason:agent.timeoutReason,aborted:agent.aborted,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes,provider:resolvedAgent.provider,model:resolvedAgent.model};
-    enqueueEvent('artifact.upload.started',{artifacts:['pi.jsonl','pi.stderr.log','agent-diagnostics.json']},true);await eventWrites;
+    const diagnostics={pid:agent.pid,spawned:agent.pid!==null,exitCode:agent.exitCode,signal:agent.signal,durationMs:agent.durationMs,timedOut:agent.timedOut,timeoutReason:agent.timeoutReason,aborted:agent.aborted,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes,provider:resolvedAgent.provider,model:resolvedAgent.model,diagnosticReportCaptured:Boolean(agent.diagnosticReport)};
+    const agentArtifactNames=['pi.jsonl','pi.stderr.log','agent-diagnostics.json',...(agent.diagnosticReport?['node-diagnostic-report.json']:[])];
+    enqueueEvent('artifact.upload.started',{artifacts:agentArtifactNames},true);await eventWrites;
     try{
-      await Promise.all([
+      const uploads=[
         putArtifact({runId:state.runId,type:'pi.transcript',name:'pi.jsonl',mediaType:'application/x-ndjson',content:agent.stdout}),
         putArtifact({runId:state.runId,type:'pi.stderr',name:'pi.stderr.log',mediaType:'text/plain',content:agent.stderr}),
         putArtifact({runId:state.runId,type:'agent.diagnostics',name:'agent-diagnostics.json',mediaType:'application/json',content:JSON.stringify(diagnostics,null,2)}),
-      ]);
-      await observedEvent('artifact.upload.completed',{artifacts:['pi.jsonl','pi.stderr.log','agent-diagnostics.json']});
+      ];
+      if(agent.diagnosticReport)uploads.push(putArtifact({runId:state.runId,type:'agent.node-diagnostic-report',name:'node-diagnostic-report.json',mediaType:'application/json',content:agent.diagnosticReport}));
+      await Promise.all(uploads);
+      await observedEvent('artifact.upload.completed',{artifacts:agentArtifactNames});
     }catch(error){await observedEvent('artifact.upload.failed',{error:error instanceof Error?error.message:String(error)});throw error;}
     if(agent.aborted)throw new RunCancelledError();
     if(agent.timedOut)throw new AgentTimeoutError(agent.timeoutReason,agentTimeoutMs);
@@ -156,7 +168,7 @@ async function executeRun(claimed:RunState){
   }catch(error){
     const finishedAt=new Date().toISOString();const cancelled=error instanceof RunCancelledError||await isCancellationRequested(state.runId).catch(()=>false);
     if(cancelled){state=await saveRun({...state,status:'cancelled',outcome:null,error:null,errorCode:null,finishedAt});logWorkerEvent(state.runId,'run.cancelled');await appendEvent({runId:state.runId,type:'run.cancelled',at:finishedAt,data:{workerId:WORKER_ID}}).catch(()=>{});}
-    else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
+    else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ProviderPreflightError?'provider_preflight_failed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
   }finally{clearInterval(heartbeat);await eventWrites;await cleanSubject(repository).catch(error=>logWorkerEvent(state.runId,'subject.cleanup.failed',{error:error instanceof Error?error.message:String(error)}));}
 }
 
