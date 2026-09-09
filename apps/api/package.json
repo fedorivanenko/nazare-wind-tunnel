@@ -1,0 +1,11 @@
+{
+  "name": "@nazare/wind-tunnel-api",
+  "private": true,
+  "type": "module",
+  "scripts": {"start": "tsx src/index.ts", "typecheck": "tsc -p tsconfig.json --noEmit"},
+  "dependencies": {
+    "@nazare/wind-tunnel-domain": "workspace:*",
+    "@nazare/wind-tunnel-storage": "workspace:*"
+  },
+  "devDependencies": {"@types/node":"24.13.3","tsx":"4.23.13","typescript":"5.9.3"}
+}
