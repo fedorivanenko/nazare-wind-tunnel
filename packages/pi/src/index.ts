@@ -16,9 +16,10 @@ export async function runPi(options: PiRunOptions) {
   if (options.thinking) args.push('--thinking', options.thinking);
   args.push('--', options.prompt);
 
+  const piBin = process.env.WIND_TUNNEL_PI_BIN ?? 'pi';
   const started = Date.now();
   return await new Promise<{exitCode:number|null; stdout:string; stderr:string; durationMs:number; timedOut:boolean}>((resolve, reject) => {
-    const child = spawn('pi', args, {cwd: options.cwd, env: {...process.env, PI_SKIP_VERSION_CHECK:'1', PI_TELEMETRY:'0'}});
+    const child = spawn(piBin, args, {cwd: options.cwd, env: {...process.env, PI_SKIP_VERSION_CHECK:'1', PI_TELEMETRY:'0'}});
     let stdout = '';
     let stderr = '';
     let timedOut = false;
