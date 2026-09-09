@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {normalizeVerification, resolveExperimentAgent, validateExperimentDefinition, withElapsed, type RunState} from './index';
+import {normalizeVerification, resolveExperimentAgent, resolveExperimentTools, validateExperimentDefinition, withElapsed, type RunState} from './index';
 
 test('normalizes verifier commands', () => {
   assert.deepEqual(normalizeVerification({id:'x',taskFile:'task.md',verification:['pnpm test']}), [
@@ -9,13 +9,14 @@ test('normalizes verifier commands', () => {
 });
 
 test('validates and resolves experiment agent config', () => {
-  const definition={id:'x',taskFile:'task.md',agent:{provider:'vercel-ai-gateway',model:'openai/gpt-oss-20b',thinking:'low',timeoutMs:900_000},nazare:{capabilityId:'capability.x',requestedChange:'Change x'},verification:['pnpm test']};
-  assert.deepEqual(validateExperimentDefinition(definition,'nazare'),[]);
+  const definition={id:'x',taskFile:'task.md',agent:{provider:'vercel-ai-gateway',model:'openai/gpt-oss-20b',thinking:'low',timeoutMs:900_000},tools:{allow:['read','edit','project_search'],extensions:['.wind-tunnel/tools.ts']},verification:['pnpm test']};
+  assert.deepEqual(validateExperimentDefinition(definition),[]);
   assert.deepEqual(resolveExperimentAgent(definition),{provider:'vercel-ai-gateway',model:'openai/gpt-oss-20b',thinking:'low',timeoutMs:900_000});
+  assert.deepEqual(resolveExperimentTools(definition),definition.tools);
 });
 
 test('rejects missing agent config', () => {
-  const errors=validateExperimentDefinition({id:'x',taskFile:'task.md',verification:['pnpm test']},'raw');
+  const errors=validateExperimentDefinition({id:'x',taskFile:'task.md',verification:['pnpm test']});
   assert.ok(errors.includes('agent is required'));
 });
 
@@ -25,7 +26,7 @@ test('derives elapsed time', () => {
     createdAt:'2026-01-01T00:00:00.000Z',startedAt:'2026-01-01T00:00:01.000Z',finishedAt:null,
     updatedAt:'2026-01-01T00:00:01.000Z',elapsedMs:0,error:null,errorCode:null,cancelRequestedAt:null,
     workerId:null,leaseUntil:null,attempts:1,
-    spec:{runId:'00000000-0000-0000-0000-000000000000',subject:{repository:'fedorivanenko/nazare-hydrogen',githubSha:'a'.repeat(40)},experiment:{path:'.wind-tunnel/example/experiment.json'},arm:'nazare',agent:{provider:null,model:null,thinking:null,timeoutMs:0},createdAt:'2026-01-01T00:00:00.000Z'},
+    spec:{runId:'00000000-0000-0000-0000-000000000000',subject:{repository:'fedorivanenko/nazare-hydrogen',githubSha:'a'.repeat(40)},experiment:{path:'.wind-tunnel/example/experiment.json'},agent:{provider:null,model:null,thinking:null,timeoutMs:0},tools:null,createdAt:'2026-01-01T00:00:00.000Z'},
   };
   assert.equal(withElapsed(state, Date.parse('2026-01-01T00:00:03.000Z')).elapsedMs, 2000);
 });

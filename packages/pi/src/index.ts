@@ -10,6 +10,8 @@ export type PiRunOptions = {
   provider?: string;
   model?: string;
   thinking?: string;
+  tools?: string[];
+  extensions?: string[];
   timeoutMs: number;
   startupTimeoutMs?: number;
   idleTimeoutMs?: number;
@@ -25,6 +27,7 @@ export type PiRunOptions = {
 };
 
 export type PiTimeoutReason = 'startup' | 'idle' | 'overall' | null;
+export const PI_VERSION = '0.85.1';
 
 export type ProviderProbe = {
   provider: string;
@@ -117,20 +120,22 @@ export function normalizePiJsonLine(line: string): PiSemanticEvent[] {
   }
 
   if (type === 'tool_execution_start' || type === 'tool_call_start' || type === 'tool_call' || type === 'tool_use') {
-    return [{type:'agent.tool.started',data:{name:event.toolName ?? event.tool_name ?? event.name ?? event.tool?.name ?? 'tool',args:event.args ?? event.arguments ?? event.input ?? event.tool?.input}}];
+    return [{type:'agent.tool.started',data:{toolCallId:event.toolCallId ?? event.tool_call_id ?? event.id,name:event.toolName ?? event.tool_name ?? event.name ?? event.tool?.name ?? 'tool',args:event.args ?? event.arguments ?? event.input ?? event.tool?.input}}];
   }
   if (type === 'tool_execution_update') {
     return [{type:'agent.tool.update',data:{name:event.toolName ?? event.tool_name ?? event.name ?? 'tool',text:textFromContent(event.output ?? event.result ?? event.content)}}];
   }
   if (type === 'tool_execution_end' || type === 'tool_call_end' || type === 'tool_result') {
-    return [{type:'agent.tool.completed',data:{name:event.toolName ?? event.tool_name ?? event.name ?? event.tool?.name ?? 'tool',result:textFromContent(event.result ?? event.output ?? event.content),error:event.error}}];
+    return [{type:'agent.tool.completed',data:{toolCallId:event.toolCallId ?? event.tool_call_id ?? event.id,name:event.toolName ?? event.tool_name ?? event.name ?? event.tool?.name ?? 'tool',result:textFromContent(event.result ?? event.output ?? event.content),isError:Boolean(event.isError ?? event.error)}}];
   }
 
   return [{type:'agent.pi',data:{piType:type || 'unknown'}}];
 }
 
 export async function runPi(options: PiRunOptions) {
-  const args = ['--mode','json','--verbose','--offline','-p','--no-session','--no-approve'];
+  const args = ['--mode','json','--verbose','--offline','-p','--no-session','--no-approve','--no-extensions','--no-skills','--no-prompt-templates','--no-context-files'];
+  if (options.tools?.length) args.push('--tools', options.tools.join(','));
+  for (const extension of options.extensions ?? []) args.push('--extension', extension);
   if (options.provider) args.push('--provider', options.provider);
   if (options.model) args.push('--model', options.model);
   if (options.thinking) args.push('--thinking', options.thinking);
@@ -143,7 +148,7 @@ export async function runPi(options: PiRunOptions) {
   await mkdir(reportDirectory,{recursive:true});
   const reportOptions=`--report-on-signal --report-signal=SIGUSR2 --report-directory=${reportDirectory} --report-filename=${reportFilename}`;
   return await new Promise<{pid:number|null; exitCode:number|null; signal:NodeJS.Signals|null; stdout:string; stderr:string; stdoutBytes:number; stderrBytes:number; diagnosticReport:string|null; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
-    const child = spawn(piBin, args, {cwd:options.cwd,stdio:['ignore','pipe','pipe'],env:{...process.env,NODE_OPTIONS:[process.env.NODE_OPTIONS,reportOptions].filter(Boolean).join(' '),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'}});
+    const child = spawn(piBin, args, {cwd:options.cwd,stdio:['ignore','pipe','pipe'],env:{...process.env,NODE_OPTIONS:[process.env.NODE_OPTIONS,reportOptions].filter(Boolean).join(' '),PI_CODING_AGENT_DIR:path.join(reportDirectory,'config'),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'}});
     let stdout = '';
     let stderr = '';
     let stdoutBytes = 0;

@@ -1,11 +1,11 @@
-import {readFile, mkdir, writeFile} from 'node:fs/promises';
+import {readFile} from 'node:fs/promises';
 import path from 'node:path';
-import {randomUUID} from 'node:crypto';
-import type {ExperimentDefinition, RunState, VerificationSpec} from '@nazare/wind-tunnel-domain';
-import {MAX_AGENT_TIMEOUT_MS, normalizeVerification, resolveExperimentAgent, validateExperimentDefinition} from '@nazare/wind-tunnel-domain';
+import {createHash, randomUUID} from 'node:crypto';
+import type {ExperimentDefinition, RunState, ToolConfig, VerificationSpec} from '@nazare/wind-tunnel-domain';
+import {MAX_AGENT_TIMEOUT_MS, normalizeVerification, resolveExperimentAgent, resolveExperimentTools, validateExperimentDefinition} from '@nazare/wind-tunnel-domain';
 import {appendEvent, claimNextRun, ensureSchema, isCancellationRequested, putArtifact, renewLease, saveRun} from '@nazare/wind-tunnel-storage';
 import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, inspectSubjectReadiness, runSubjectProcess, type SubjectProcessObserver} from '@nazare/wind-tunnel-subject-manager';
-import {normalizePiJsonLine, probeProvider, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
+import {normalizePiJsonLine, PI_VERSION, probeProvider, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
 
 const WORKER_ID=process.env.WIND_TUNNEL_WORKER_ID??`${process.env.RAILWAY_SERVICE_NAME??'worker'}:${process.pid}:${randomUUID().slice(0,8)}`;
 const POLL_MS=Number(process.env.WIND_TUNNEL_POLL_MS??2_000);
@@ -25,21 +25,21 @@ function logWorkerEvent(runId:string|null,event:string,data:Record<string,unknow
   console.log(JSON.stringify({at:new Date().toISOString(),service:'wind-tunnel-worker',workerId:WORKER_ID,runId,event,...data}));
 }
 
-function buildPrompt(task:string,arm:'raw'|'nazare'){
-  const common=['Complete the requested repository change.','Do not weaken tests, lint rules, policies, evidence contracts, or architectural constraints.','Leave the working checkout with the implementation applied.','','TASK:',task.trim()].join('\n');
-  return arm==='raw'?common:`${common}\n\nNAZARE COMPILED CONTEXT:\nA task projection is available at .nazare/task.json. Treat it as the authoritative starting boundary.`;
+function buildPrompt(task:string){
+  return ['Complete the requested repository change.','Use only the tools provided for this run.','Do not weaken tests, lint rules, policies, evidence contracts, or architectural constraints.','Leave the working checkout with the implementation applied.','','TASK:',task.trim()].join('\n');
+}
+const sha256=(value:string|Buffer)=>createHash('sha256').update(value).digest('hex');
+async function resolveToolEnvironment(cwd:string,config:ToolConfig){
+  const extensions=[];
+  for(const relativePath of config.extensions){
+    const absolutePath=path.resolve(cwd,relativePath);
+    if(!absolutePath.startsWith(`${path.resolve(cwd)}${path.sep}`))throw new ExperimentConfigError([`tool extension must stay inside subject repository: ${relativePath}`]);
+    const content=await readFile(absolutePath);
+    extensions.push({path:relativePath,absolutePath,sha256:sha256(content)});
+  }
+  return {allow:config.allow,extensions};
 }
 async function assertNotCancelled(runId:string){if(await isCancellationRequested(runId))throw new RunCancelledError();}
-async function compileNazare(cwd:string,definition:ExperimentDefinition,observer?:SubjectProcessObserver){
-  if(!definition.nazare)throw new Error('nazare arm requires experiment.nazare configuration');
-  await mkdir(path.join(cwd,'.nazare'),{recursive:true});
-  const result=await runSubjectProcess('pnpm',['run','nazare:registry','compile',definition.nazare.capabilityId,definition.nazare.requestedChange],cwd,60_000,observer);
-  if(result.exitCode!==0||result.timedOut)throw new Error(`Nazare compile failed: ${result.stderr||result.stdout}`);
-  const jsonStart=result.stdout.indexOf('{');if(jsonStart<0)throw new Error('Nazare compiler returned no JSON');
-  const projection=JSON.parse(result.stdout.slice(jsonStart));
-  await writeFile(path.join(cwd,'.nazare','task.json'),JSON.stringify(projection,null,2));
-  return projection;
-}
 async function verify(cwd:string,checks:VerificationSpec[],runId:string,observer?:SubjectProcessObserver){
   const results=[];let stdout='';let stderr='';
   for(const check of checks){
@@ -52,15 +52,48 @@ async function verify(cwd:string,checks:VerificationSpec[],runId:string,observer
   }
   return {results,stdout,stderr};
 }
+async function captureWorkingTree(cwd:string,sourceSha:string,runId:string,partial:boolean,observer?:SubjectProcessObserver){
+  const intent=await runSubjectProcess('git',['add','--intent-to-add','--all'],cwd,60_000,observer);
+  if(intent.exitCode!==0||intent.timedOut)throw new Error(`Could not enumerate workspace changes: ${intent.stderr}`);
+  const patch=await runSubjectProcess('git',['diff','--no-ext-diff','--binary',sourceSha,'--','.'],cwd,60_000,observer);
+  const changed=await runSubjectProcess('git',['diff','--name-only',sourceSha,'--','.'],cwd,60_000,observer);
+  if(patch.exitCode!==0||patch.timedOut||changed.exitCode!==0||changed.timedOut)throw new Error(`Could not capture workspace changes: ${patch.stderr||changed.stderr}`);
+  const files=changed.stdout.split('\n').map(file=>file.trim()).filter(Boolean);
+  await Promise.all([
+    putArtifact({runId,type:'git.patch',name:'patch.diff',mediaType:'text/x-diff',content:patch.stdout}),
+    putArtifact({runId,type:'git.changed-files',name:'changed-files.txt',mediaType:'text/plain',content:changed.stdout}),
+  ]);
+  await appendEvent({runId,type:'workspace.captured',at:new Date().toISOString(),data:{partial,files,changedFiles:files.length,patchBytes:Buffer.byteLength(patch.stdout)}});
+}
 
 async function executeRun(claimed:RunState){
   let state=claimed;
   let eventWrites=Promise.resolve();
-  const enqueueEvent=(type:string,data?:Record<string,unknown>,log=false)=>{
+  let workspaceCaptured=false;
+  const enqueueEvent=(type:string,data?:Record<string,unknown>,log=false,at=new Date().toISOString())=>{
     if(log)logWorkerEvent(state.runId,type,data);
-    eventWrites=eventWrites.then(()=>appendEvent({runId:state.runId,type,at:new Date().toISOString(),data})).then(()=>undefined).catch(error=>console.error('event write failed',error));
+    eventWrites=eventWrites.then(()=>appendEvent({runId:state.runId,type,at,data})).then(()=>undefined).catch(error=>console.error('event write failed',error));
   };
   const observedEvent=async(type:string,data:Record<string,unknown>={})=>{logWorkerEvent(state.runId,type,data);await appendEvent({runId:state.runId,type,at:new Date().toISOString(),data});};
+  const deltaBatches=new Map<string,{type:string;data:Record<string,unknown>;text:string;at:string}>();
+  let deltaTimer:NodeJS.Timeout|null=null;
+  const flushDeltas=()=>{
+    if(deltaTimer){clearTimeout(deltaTimer);deltaTimer=null;}
+    for(const batch of deltaBatches.values())enqueueEvent(batch.type,{...batch.data,text:batch.text},false,batch.at);
+    deltaBatches.clear();
+  };
+  const toolStarts=new Map<string,number>();
+  const enqueueSemanticEvent=(type:string,data:Record<string,unknown>={})=>{
+    const toolCallId=typeof data.toolCallId==='string'?data.toolCallId:null;
+    if(type==='agent.tool.started'&&toolCallId)toolStarts.set(toolCallId,Date.now());
+    if(type==='agent.tool.completed'&&toolCallId){const started=toolStarts.get(toolCallId);if(started)data.durationMs=Date.now()-started;toolStarts.delete(toolCallId);}
+    if(type!=='agent.thinking.delta'&&type!=='agent.message.delta'){flushDeltas();enqueueEvent(type,data);return;}
+    const key=`${type}:${String(data.role??'')}:${String(data.contentIndex??'')}`;
+    const existing=deltaBatches.get(key);const text=String(data.text??'');
+    if(existing)existing.text+=text;else deltaBatches.set(key,{type,data:{...data,text:undefined},text,at:new Date().toISOString()});
+    if((deltaBatches.get(key)?.text.length??0)>=8_192)flushDeltas();
+    else if(!deltaTimer){deltaTimer=setTimeout(flushDeltas,500);deltaTimer.unref();}
+  };
   const processObserver:SubjectProcessObserver=observation=>enqueueEvent(`subject.process.${observation.type}`,observation as unknown as Record<string,unknown>,true);
   const heartbeat=setInterval(()=>{renewLease(state.runId,WORKER_ID).catch(error=>logWorkerEvent(state.runId,'worker.lease.failed',{error:error instanceof Error?error.message:String(error)}));},HEARTBEAT_MS);heartbeat.unref();
   const repository=state.spec.subject.repository;const sourceSha=state.spec.subject.githubSha;const cwd=getSubjectPath(repository);
@@ -75,11 +108,13 @@ async function executeRun(claimed:RunState){
 
     const experimentRaw=await readFile(path.join(cwd,state.spec.experiment.path),'utf8');
     const definition=JSON.parse(experimentRaw) as ExperimentDefinition;
-    const configErrors=validateExperimentDefinition(definition,state.spec.arm);
+    const configErrors=validateExperimentDefinition(definition);
     if(configErrors.length)throw new ExperimentConfigError(configErrors);
     const resolvedAgent=resolveExperimentAgent(definition);
-    state=await saveRun({...state,spec:{...state.spec,agent:resolvedAgent}});
-    await observedEvent('experiment.resolved',{id:definition.id,agent:resolvedAgent,verificationChecks:definition.verification.length});
+    const resolvedTools=resolveExperimentTools(definition);
+    const toolEnvironment=await resolveToolEnvironment(cwd,resolvedTools);
+    state=await saveRun({...state,spec:{...state.spec,agent:resolvedAgent,tools:resolvedTools}});
+    await observedEvent('experiment.resolved',{id:definition.id,agent:resolvedAgent,tools:resolvedTools,verificationChecks:definition.verification.length});
 
     const taskPath=path.resolve(cwd,definition.taskFile);
     if(!taskPath.startsWith(`${path.resolve(cwd)}${path.sep}`))throw new ExperimentConfigError(['taskFile must stay inside subject repository']);
@@ -101,27 +136,23 @@ async function executeRun(claimed:RunState){
     await assertNotCancelled(state.runId);
 
     await putArtifact({runId:state.runId,type:'run.spec',name:'run-spec.json',mediaType:'application/json',content:JSON.stringify(state.spec,null,2)});
-    if(state.spec.arm==='nazare'){
-      state=await saveRun({...state,status:'compiling'});
-      await observedEvent('nazare.compile.started');
-      const projection=await compileNazare(cwd,definition,processObserver);await eventWrites;
-      await putArtifact({runId:state.runId,type:'nazare.compiled-task',name:'compiled-task.json',mediaType:'application/json',content:JSON.stringify(projection,null,2)});
-      await observedEvent('nazare.compile.completed');
-      await assertNotCancelled(state.runId);
-    }
+    const pinnedTools={allow:toolEnvironment.allow,extensions:toolEnvironment.extensions.map(extension=>({path:extension.path,sha256:extension.sha256}))};
+    await putArtifact({runId:state.runId,type:'agent.tool-manifest',name:'tool-manifest.json',mediaType:'application/json',content:JSON.stringify(pinnedTools,null,2)});
 
-    const prompt=buildPrompt(task,state.spec.arm);
-    await putArtifact({runId:state.runId,type:'agent.prompt',name:'prompt.txt',mediaType:'text/plain',content:prompt});
+    const prompt=buildPrompt(task);
     const agentTimeoutMs=Math.min(MAX_AGENT_TIMEOUT_MS,Math.max(30_000,resolvedAgent.timeoutMs));
+    const lockfile=await readFile(path.join(cwd,'pnpm-lock.yaml'));
+    await putArtifact({runId:state.runId,type:'run.environment',name:'environment.json',mediaType:'application/json',content:JSON.stringify({runner:{commitSha:process.env.RAILWAY_GIT_COMMIT_SHA??null,deploymentId:process.env.RAILWAY_DEPLOYMENT_ID??null,node:process.versions.node,pi:PI_VERSION,pnpm:'10.17.1'},subject:{repository,sourceSha,lockfileSha256:sha256(lockfile)},agent:{...resolvedAgent,effectiveTimeoutMs:agentTimeoutMs},tools:pinnedTools,promptSha256:sha256(prompt)},null,2)});
+    await putArtifact({runId:state.runId,type:'agent.prompt',name:'prompt.txt',mediaType:'text/plain',content:prompt});
     state=await saveRun({...state,status:'running',error:null,errorCode:null,startedAt:state.startedAt??new Date().toISOString()});
     await observedEvent('agent.started',{timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,provider:resolvedAgent.provider,model:resolvedAgent.model,thinking:resolvedAgent.thinking,preflight:true});
     await observedEvent('agent.spawn.requested',{executable:process.env.WIND_TUNNEL_PI_BIN??'pi'});
 
     const controller=new AbortController();
     const cancellationWatcher=setInterval(()=>{isCancellationRequested(state.runId).then(cancelled=>{if(cancelled)controller.abort();}).catch(error=>logWorkerEvent(state.runId,'agent.cancel_poll.failed',{error:error instanceof Error?error.message:String(error)}));},CANCEL_POLL_MS);cancellationWatcher.unref();
-    const enqueuePiLine=(line:string)=>{for(const event of normalizePiJsonLine(line))enqueueEvent(event.type,event.data);};
+    const enqueuePiLine=(line:string)=>{for(const event of normalizePiJsonLine(line))enqueueSemanticEvent(event.type,event.data);};
     const agentPromise=runPi({
-      cwd,prompt,provider:resolvedAgent.provider,model:resolvedAgent.model,thinking:resolvedAgent.thinking??undefined,
+      cwd,prompt,provider:resolvedAgent.provider,model:resolvedAgent.model,thinking:resolvedAgent.thinking??undefined,tools:toolEnvironment.allow,extensions:toolEnvironment.extensions.map(extension=>extension.absolutePath),
       timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,heartbeatMs:5_000,signal:controller.signal,
       onSpawn:event=>enqueueEvent('agent.process.spawned',event,true),
       onFirstOutput:event=>enqueueEvent('agent.first_output',event,true),
@@ -133,6 +164,7 @@ async function executeRun(claimed:RunState){
     });
     let agent:Awaited<typeof agentPromise>;
     try{agent=await agentPromise;}finally{clearInterval(cancellationWatcher);}
+    flushDeltas();
     enqueueEvent('agent.process.exited',{pid:agent.pid,exitCode:agent.exitCode,signal:agent.signal,durationMs:agent.durationMs,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes},true);
     if(agent.timedOut)enqueueEvent('agent.timeout',{timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,timeoutReason:agent.timeoutReason,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes},true);
     await eventWrites;
@@ -149,15 +181,13 @@ async function executeRun(claimed:RunState){
       await Promise.all(uploads);
       await observedEvent('artifact.upload.completed',{artifacts:agentArtifactNames});
     }catch(error){await observedEvent('artifact.upload.failed',{error:error instanceof Error?error.message:String(error)});throw error;}
+    await captureWorkingTree(cwd,sourceSha,state.runId,agent.aborted||agent.timedOut||agent.exitCode!==0,processObserver);workspaceCaptured=true;await eventWrites;
     if(agent.aborted)throw new RunCancelledError();
     if(agent.timedOut)throw new AgentTimeoutError(agent.timeoutReason,agentTimeoutMs);
     if(agent.exitCode!==0)throw new Error(`Pi exited ${agent.exitCode}`);
     await observedEvent('agent.completed',{durationMs:agent.durationMs,exitCode:agent.exitCode,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:agent.stdoutBytes,stderrBytes:agent.stderrBytes});
     await assertNotCancelled(state.runId);
 
-    const patch=await runSubjectProcess('git',['diff','--no-ext-diff','--binary',sourceSha,'--','.',' :(exclude).nazare/task.json'.trim()],cwd,60_000,processObserver);
-    const changed=await runSubjectProcess('git',['diff','--name-only',sourceSha,'--','.'],cwd,60_000,processObserver);await eventWrites;
-    await Promise.all([putArtifact({runId:state.runId,type:'git.patch',name:'patch.diff',mediaType:'text/x-diff',content:patch.stdout}),putArtifact({runId:state.runId,type:'git.changed-files',name:'changed-files.txt',mediaType:'text/plain',content:changed.stdout})]);
     state=await saveRun({...state,status:'verifying'});
     await appendEvent({runId:state.runId,type:'verification.started',at:new Date().toISOString(),data:{checks:checks.length}});
     const verification=await verify(cwd,checks,state.runId,processObserver);await eventWrites;
@@ -166,10 +196,12 @@ async function executeRun(claimed:RunState){
     state=await saveRun({...state,status:'completed',outcome:passed?'pass':'fail',finishedAt,error:null,errorCode:null});
     logWorkerEvent(state.runId,'run.completed',{outcome:state.outcome});await appendEvent({runId:state.runId,type:'run.completed',at:finishedAt,data:{outcome:state.outcome}});
   }catch(error){
+    flushDeltas();await eventWrites;
+    if(!workspaceCaptured){await captureWorkingTree(cwd,sourceSha,state.runId,true,processObserver).then(()=>{workspaceCaptured=true;}).catch(captureError=>logWorkerEvent(state.runId,'workspace.capture.failed',{error:captureError instanceof Error?captureError.message:String(captureError)}));await eventWrites;}
     const finishedAt=new Date().toISOString();const cancelled=error instanceof RunCancelledError||await isCancellationRequested(state.runId).catch(()=>false);
     if(cancelled){state=await saveRun({...state,status:'cancelled',outcome:null,error:null,errorCode:null,finishedAt});logWorkerEvent(state.runId,'run.cancelled');await appendEvent({runId:state.runId,type:'run.cancelled',at:finishedAt,data:{workerId:WORKER_ID}}).catch(()=>{});}
     else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ProviderPreflightError?'provider_preflight_failed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
-  }finally{clearInterval(heartbeat);await eventWrites;await cleanSubject(repository).catch(error=>logWorkerEvent(state.runId,'subject.cleanup.failed',{error:error instanceof Error?error.message:String(error)}));}
+  }finally{clearInterval(heartbeat);flushDeltas();await eventWrites;await cleanSubject(repository).catch(error=>logWorkerEvent(state.runId,'subject.cleanup.failed',{error:error instanceof Error?error.message:String(error)}));}
 }
 
 await ensureSchema();logWorkerEvent(null,'worker.ready',{pid:process.pid,pollMs:POLL_MS,heartbeatMs:HEARTBEAT_MS});

@@ -1,6 +1,6 @@
 # Nazare Wind Tunnel
 
-Nazare Wind Tunnel is a persistent testing environment for running model-backed experiments against external subject repositories such as `fedorivanenko/nazare-hydrogen`.
+Nazare Wind Tunnel is a persistent testing environment that pins a subject repository and agent configuration, gives the model an explicit toolset, and measures task effectiveness.
 
 The Wind Tunnel repository contains the testing machinery. Subject repositories remain separate and are materialized lazily into a persistent Railway volume by repository + exact commit SHA.
 
@@ -28,8 +28,6 @@ persistent /workspace subject cache
         +-- .wind-tunnel/subjects
 ```
 
-A run is one arm only: `raw` or `nazare`. Historical comparisons are queries over Postgres; execution does not couple two arms together.
-
 ## pnpm monorepo
 
 ```text
@@ -56,12 +54,31 @@ Content-Type: application/json
 {
   "repository": "fedorivanenko/nazare-hydrogen",
   "sourceSha": "<exact 40-char PR HEAD SHA>",
-  "experiment": ".wind-tunnel/hydrogen-operability/experiment.json",
-  "arm": "nazare"
+  "experiment": ".wind-tunnel/hydrogen-operability/experiment.json"
 }
 ```
 
-The API stores the immutable request in Postgres and returns immediately.
+The API stores the immutable request in Postgres and returns immediately. Experiment configuration pins provider, model, thinking level, timeout, verification, enabled tool names, and repo-relative Pi extensions:
+
+```json
+{
+  "id": "marketing-consent-02",
+  "taskFile": "experiments/task.md",
+  "agent": {
+    "provider": "vercel-ai-gateway",
+    "model": "openai/gpt-oss-20b",
+    "thinking": "low",
+    "timeoutMs": 30000
+  },
+  "tools": {
+    "allow": ["read", "bash", "edit", "write", "project_search"],
+    "extensions": [".wind-tunnel/project-tools.ts"]
+  },
+  "verification": ["pnpm test"]
+}
+```
+
+Pi starts with ambient extensions, skills, prompt templates, and context files disabled. Only declared tools and extensions load. If `tools` is omitted, fixed defaults are `read`, `bash`, `edit`, and `write`.
 
 ## Persistent subject cache
 
@@ -148,7 +165,7 @@ WIND_TUNNEL_AGENT_STARTUP_TIMEOUT_MS=15000
 WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS=60000
 ```
 
-Before Pi starts, the worker performs an authenticated provider/model probe. Pi runs with `--offline` to skip startup catalog/version network operations; model inference remains online. Worker lifecycle, subject commands and Pi process telemetry are emitted as structured JSON to Railway logs and persisted as run events. Timeout diagnostics include Pi stdout/stderr, `agent-diagnostics.json`, and a redacted Node diagnostic report when the Pi runtime can produce one.
+Before Pi starts, worker performs an authenticated provider/model probe and hashes declared tool extensions. Pi runs with `--offline` to skip startup catalog/version network operations; model inference remains online. PostgreSQL stores lifecycle, batched conversation, tool, workspace, and verification events. Full Pi JSONL remains in S3. Every outcome—including timeout and cancellation—captures `patch.diff` and `changed-files.txt` before cleanup. `environment.json` and `tool-manifest.json` record pinned execution evidence. Timeout diagnostics include Pi stdout/stderr, `agent-diagnostics.json`, and a redacted Node diagnostic report when Pi can produce one.
 
 ## CI
 

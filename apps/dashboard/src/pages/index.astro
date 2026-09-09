@@ -25,7 +25,7 @@ const fmt = (ms) => ms < 1000 ? `${Math.round(ms)} ms` : `${(ms/1000).toFixed(ms
         {runs.map((run) => (
           <a class="run" href={`/runs/${run.runId}`}>
             <div class="row"><div><span class={`status ${run.status}`}>{run.status}</span> <span class="meta">{run.runId}</span></div><strong>{fmt(run.elapsedMs)}</strong></div>
-            <div class="meta">{run.spec.subject.repository} @ {run.spec.subject.githubSha.slice(0,10)} · {run.spec.arm} · {run.spec.experiment.path}</div>
+            <div class="meta">{run.spec.subject.repository} @ {run.spec.subject.githubSha.slice(0,10)} · {run.spec.experiment.path}</div>
             <div class="meta">worker: <span class={workerHealth(run)}>{workerHealth(run)}</span>{run.errorCode ? ` · ${run.errorCode}` : ''}</div>
           </a>
         ))}

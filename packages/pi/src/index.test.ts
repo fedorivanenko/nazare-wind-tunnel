@@ -9,17 +9,23 @@ test('closes Pi stdin when prompt is passed as an argument', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'wind-tunnel-pi-test-'));
   const executable = path.join(directory, 'pi-stdin-fixture.mjs');
   await writeFile(executable, `#!/usr/bin/env node
-process.stdin.on('end', () => console.log(JSON.stringify({type:'session',id:'fixture'})));
+process.stdin.on('end', () => console.log(JSON.stringify({type:'session',id:'fixture',argv:process.argv.slice(2)})));
 process.stdin.resume();
 `);
   await chmod(executable, 0o755);
   const previous = process.env.WIND_TUNNEL_PI_BIN;
   process.env.WIND_TUNNEL_PI_BIN = executable;
   try {
-    const result = await runPi({cwd:directory,prompt:'fixture prompt',timeoutMs:10_000,startupTimeoutMs:5_000});
+    const extension = path.join(directory, 'tools.ts');
+    await writeFile(extension, 'export default function () {}');
+    const result = await runPi({cwd:directory,prompt:'fixture prompt',tools:['read','custom_tool'],extensions:[extension],timeoutMs:10_000,startupTimeoutMs:5_000});
     assert.equal(result.timedOut, false);
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /"type":"session"/);
+    const argv = JSON.parse(result.stdout.trim()).argv as string[];
+    assert.ok(argv.includes('--no-extensions'));
+    assert.deepEqual(argv.slice(argv.indexOf('--tools'), argv.indexOf('--tools') + 2), ['--tools','read,custom_tool']);
+    assert.deepEqual(argv.slice(argv.indexOf('--extension'), argv.indexOf('--extension') + 2), ['--extension',extension]);
   } finally {
     if (previous === undefined) delete process.env.WIND_TUNNEL_PI_BIN;
     else process.env.WIND_TUNNEL_PI_BIN = previous;

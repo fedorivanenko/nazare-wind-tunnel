@@ -100,7 +100,7 @@ export async function ensureSchema() {
     ALTER TABLE wind_tunnel_runs ADD COLUMN IF NOT EXISTS error_code text NULL;
     ALTER TABLE wind_tunnel_runs ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz NULL;
     CREATE INDEX IF NOT EXISTS wind_tunnel_runs_claim_idx ON wind_tunnel_runs (status, lease_until, created_at);
-    CREATE INDEX IF NOT EXISTS wind_tunnel_runs_subject_idx ON wind_tunnel_runs ((spec->'subject'->>'repository'), (spec->'subject'->>'githubSha'), (spec->'experiment'->>'path'), (spec->>'arm'));
+    CREATE INDEX IF NOT EXISTS wind_tunnel_runs_subject_v2_idx ON wind_tunnel_runs ((spec->'subject'->>'repository'), (spec->'subject'->>'githubSha'), (spec->'experiment'->>'path'));
 
     CREATE TABLE IF NOT EXISTS wind_tunnel_events (
       seq bigserial PRIMARY KEY,
@@ -132,14 +132,13 @@ export async function createRun(spec: RunSpec) {
       AND spec->'subject'->>'repository' = ${sqlLiteral(spec.subject.repository)}
       AND spec->'subject'->>'githubSha' = ${sqlLiteral(spec.subject.githubSha)}
       AND spec->'experiment'->>'path' = ${sqlLiteral(spec.experiment.path)}
-      AND spec->>'arm' = ${sqlLiteral(spec.arm)}
     ORDER BY created_at DESC LIMIT 1;
   `);
   if (duplicate) return getRun(duplicate);
 
-  await psql(`INSERT INTO wind_tunnel_runs (run_id,status,created_at,updated_at,spec,arms)
-    VALUES (${sqlLiteral(spec.runId)}::uuid,'queued',${sqlLiteral(now)}::timestamptz,${sqlLiteral(now)}::timestamptz,${jsonLiteral(spec)},'{}'::jsonb);`);
-  await appendEvent({runId: spec.runId, type: 'run.created', at: now, data: {repository: spec.subject.repository, arm: spec.arm}});
+  await psql(`INSERT INTO wind_tunnel_runs (run_id,status,created_at,updated_at,spec)
+    VALUES (${sqlLiteral(spec.runId)}::uuid,'queued',${sqlLiteral(now)}::timestamptz,${sqlLiteral(now)}::timestamptz,${jsonLiteral(spec)});`);
+  await appendEvent({runId: spec.runId, type: 'run.created', at: now, data: {repository: spec.subject.repository}});
   return getRun(spec.runId);
 }
 
