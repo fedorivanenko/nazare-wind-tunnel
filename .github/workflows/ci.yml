@@ -1,32 +1,38 @@
-name: CI
+name: Wind Tunnel CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, wind-tunnel-monorepo-v2]
   pull_request:
 
 jobs:
-  test:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm install
-      - run: npm test
-      - run: npm run typecheck
-      - name: Verify production entrypoint
+          cache: pnpm
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Verify architecture boundaries
         run: |
-          node -e "const p=require('./package.json'); if (p.scripts?.start !== 'tsx src/workstation-mcp.ts') process.exit(1)"
-          grep -q 'CMD \["npm", "start"\]' Dockerfile.control
-      - name: Build production container
-        run: docker build -f Dockerfile.control -t nazare-wind-tunnel:ci .
-      - name: Verify Wind Tunnel controls
-        run: |
-          grep -q 'WIND_TUNNEL_TARGET_SHA' README.md
-          grep -q 'maxSeconds' benchmark/config.json
-          grep -q 'maxToolCalls' benchmark/config.json
-          grep -q 'environment/' README.md
-          grep -q 'budget_exceeded' src/workstation-runner.ts
-          grep -q 'run_test' src/workstation-mcp.ts
+          test -f apps/api/src/index.ts
+          test -f apps/worker/src/index.ts
+          test -f packages/subject-manager/src/index.ts
+          grep -q "claimNextRun" apps/worker/src/index.ts
+          grep -q "ensureSubject" apps/worker/src/index.ts
+          grep -q "pnpm-lock.yaml" packages/subject-manager/src/index.ts
+          if grep -R "workstation-mcp\|oauth-gateway" apps packages; then
+            echo "MCP/OAuth must not be in the active v2 path"
+            exit 1
+          fi
+      - name: Build API image
+        run: docker build -f Dockerfile.control -t nazare-wind-tunnel-api:ci .
+      - name: Build worker image
+        run: docker build -f Dockerfile.worker -t nazare-wind-tunnel-worker:ci .
