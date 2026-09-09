@@ -5,12 +5,14 @@ import type {ExperimentDefinition, RunState, VerificationSpec} from '@nazare/win
 import {normalizeVerification} from '@nazare/wind-tunnel-domain';
 import {appendEvent, claimNextRun, ensureSchema, isCancellationRequested, putArtifact, renewLease, saveRun} from '@nazare/wind-tunnel-storage';
 import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, inspectSubjectReadiness, runSubjectProcess} from '@nazare/wind-tunnel-subject-manager';
-import {runPi} from '@nazare/wind-tunnel-pi';
+import {normalizePiJsonLine, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
 
 const WORKER_ID = process.env.WIND_TUNNEL_WORKER_ID ?? `${process.env.RAILWAY_SERVICE_NAME ?? 'worker'}:${process.pid}:${randomUUID().slice(0,8)}`;
 const POLL_MS = Number(process.env.WIND_TUNNEL_POLL_MS ?? 2_000);
 const HEARTBEAT_MS = Number(process.env.WIND_TUNNEL_HEARTBEAT_MS ?? 5_000);
-const MAX_MODEL_TIMEOUT_MS = 30_000;
+const MAX_AGENT_TIMEOUT_MS = 15 * 60_000;
+const AGENT_STARTUP_TIMEOUT_MS = Number(process.env.WIND_TUNNEL_AGENT_STARTUP_TIMEOUT_MS ?? 15_000);
+const AGENT_IDLE_TIMEOUT_MS = Number(process.env.WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS ?? 60_000);
 const CANCEL_POLL_MS = 750;
 
 class RunCancelledError extends Error {
@@ -21,8 +23,8 @@ class RunCancelledError extends Error {
 }
 
 class AgentTimeoutError extends Error {
-  constructor() {
-    super(`Pi exceeded hard ${MAX_MODEL_TIMEOUT_MS}ms model budget`);
+  constructor(reason: PiTimeoutReason, timeoutMs: number) {
+    super(`Pi timed out (${reason ?? 'unknown'}); overall budget ${timeoutMs}ms, startup ${AGENT_STARTUP_TIMEOUT_MS}ms, idle ${AGENT_IDLE_TIMEOUT_MS}ms`);
     this.name = 'AgentTimeoutError';
   }
 }
@@ -144,10 +146,10 @@ async function executeRun(claimed: RunState) {
     const prompt = buildPrompt(task, state.spec.arm);
     await putArtifact({runId:state.runId,type:'agent.prompt',name:'prompt.txt',mediaType:'text/plain',content:prompt});
 
-    const requestedTimeout = Number(state.spec.agent.timeoutMs || MAX_MODEL_TIMEOUT_MS);
-    const modelTimeoutMs = Math.min(MAX_MODEL_TIMEOUT_MS, Math.max(1_000, requestedTimeout));
+    const requestedTimeout = Number(state.spec.agent.timeoutMs || MAX_AGENT_TIMEOUT_MS);
+    const agentTimeoutMs = Math.min(MAX_AGENT_TIMEOUT_MS, Math.max(30_000, requestedTimeout));
     state = await saveRun({...state,status:'running',error:null,errorCode:null,startedAt:state.startedAt ?? new Date().toISOString()});
-    await appendEvent({runId:state.runId,type:'agent.started',at:new Date().toISOString(),data:{timeoutMs:modelTimeoutMs,provider:state.spec.agent.provider,model:state.spec.agent.model,thinking:state.spec.agent.thinking,preflight:true}});
+    await appendEvent({runId:state.runId,type:'agent.started',at:new Date().toISOString(),data:{timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,provider:state.spec.agent.provider,model:state.spec.agent.model,thinking:state.spec.agent.thinking,preflight:true}});
 
     const controller = new AbortController();
     const cancellationWatcher = setInterval(() => {
@@ -158,9 +160,14 @@ async function executeRun(claimed: RunState) {
     cancellationWatcher.unref();
 
     let eventWrites = Promise.resolve();
-    const enqueueOutputEvent = (type: string, line: string) => {
-      const text = line.slice(0, 8_000);
-      eventWrites = eventWrites.then(() => appendEvent({runId:state.runId,type,at:new Date().toISOString(),data:{text}})).then(() => undefined).catch(() => undefined);
+    const enqueueEvent = (type: string, data?: Record<string, unknown>) => {
+      eventWrites = eventWrites
+        .then(() => appendEvent({runId:state.runId,type,at:new Date().toISOString(),data}))
+        .then(() => undefined)
+        .catch(error => console.error('agent event write failed', error));
+    };
+    const enqueuePiLine = (line: string) => {
+      for (const event of normalizePiJsonLine(line)) enqueueEvent(event.type,event.data);
     };
 
     const agent = await runPi({
@@ -169,10 +176,12 @@ async function executeRun(claimed: RunState) {
       provider:state.spec.agent.provider ?? undefined,
       model:state.spec.agent.model ?? undefined,
       thinking:state.spec.agent.thinking ?? undefined,
-      timeoutMs:modelTimeoutMs,
+      timeoutMs:agentTimeoutMs,
+      startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,
+      idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,
       signal:controller.signal,
-      onStdoutLine: line => enqueueOutputEvent('agent.output', line),
-      onStderrLine: line => enqueueOutputEvent('agent.stderr', line),
+      onStdoutLine: enqueuePiLine,
+      onStderrLine: line => enqueueEvent('agent.stderr',{text:line.slice(0,8_000)}),
     });
     clearInterval(cancellationWatcher);
     await eventWrites;
@@ -184,11 +193,11 @@ async function executeRun(claimed: RunState) {
 
     if (agent.aborted) throw new RunCancelledError();
     if (agent.timedOut) {
-      await appendEvent({runId:state.runId,type:'agent.timeout',at:new Date().toISOString(),data:{timeoutMs:modelTimeoutMs,stdoutBytes:Buffer.byteLength(agent.stdout),stderrBytes:Buffer.byteLength(agent.stderr)}});
-      throw new AgentTimeoutError();
+      await appendEvent({runId:state.runId,type:'agent.timeout',at:new Date().toISOString(),data:{timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,timeoutReason:agent.timeoutReason,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:Buffer.byteLength(agent.stdout),stderrBytes:Buffer.byteLength(agent.stderr)}});
+      throw new AgentTimeoutError(agent.timeoutReason,agentTimeoutMs);
     }
     if (agent.exitCode !== 0) throw new Error(`Pi exited ${agent.exitCode}`);
-    await appendEvent({runId:state.runId,type:'agent.completed',at:new Date().toISOString(),data:{durationMs:agent.durationMs,exitCode:agent.exitCode,stdoutBytes:Buffer.byteLength(agent.stdout),stderrBytes:Buffer.byteLength(agent.stderr)}});
+    await appendEvent({runId:state.runId,type:'agent.completed',at:new Date().toISOString(),data:{durationMs:agent.durationMs,exitCode:agent.exitCode,firstOutputMs:agent.firstOutputMs,lastActivityAt:agent.lastActivityAt,stdoutBytes:Buffer.byteLength(agent.stdout),stderrBytes:Buffer.byteLength(agent.stderr)}});
     await assertNotCancelled(state.runId);
 
     const patch = await runSubjectProcess('git',['diff','--no-ext-diff','--binary',sourceSha,'--','.',' :(exclude).nazare/task.json'.trim()],cwd,60_000);

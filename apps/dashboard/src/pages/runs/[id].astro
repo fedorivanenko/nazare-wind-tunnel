@@ -11,7 +11,7 @@ let loadError = '';
 try {
   [run, events, artifacts] = await Promise.all([
     controlJson<RunState>(`/runs/${id}`),
-    controlJson<EventsResponse>(`/runs/${id}/events?limit=500`).then(x => x.events),
+    controlJson<EventsResponse>(`/runs/${id}/events?limit=1000`).then(x => x.events),
     controlJson<ArtifactsResponse>(`/runs/${id}/artifacts`).then(x => x.artifacts),
   ]);
 } catch (error) { loadError = error instanceof Error ? error.message : String(error); }
@@ -31,85 +31,134 @@ const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
     const eventTime = (e) => Date.parse(e.at);
     const find = (type) => state.events.find((e) => e.type === type);
     const phase = (startType,endTypes) => {const start=find(startType); if(!start)return null; const end=state.events.find((e)=>endTypes.includes(e.type)); const stop=end?eventTime(end):(terminal.has(state.run.status)?Date.parse(state.run.finishedAt||state.run.updatedAt):Date.now()); return Math.max(0,stop-eventTime(start));};
-    const agentBudget = () => {const start=find('agent.started');if(!start)return null;const end=state.events.find((e)=>['agent.completed','agent.timeout','run.cancelled'].includes(e.type));const elapsed=(end?eventTime(end):Date.now())-eventTime(start);const budget=state.run.spec.agent.timeoutMs||30000;return {elapsed,budget,remaining:Math.max(0,budget-elapsed),pct:Math.min(100,Math.max(0,elapsed/budget*100))};};
     const workerHealth = () => terminal.has(state.run.status)||!state.run.workerId?'—':Date.parse(state.run.leaseUntil||0)>Date.now()?'healthy':'stale';
     const eventLine = (e) => {let detail='';if(e.data?.text)detail='  '+String(e.data.text).replace(/\s+/g,' ').slice(0,500);else if(e.data&&Object.keys(e.data).length)detail='  '+JSON.stringify(e.data).slice(0,500);return new Date(e.at).toLocaleTimeString()+'  '+e.type+detail;};
 
-    const safeJson = (text) => {try{return JSON.parse(text)}catch{return null}};
-    const textFromContent = (value) => {
-      if(typeof value==='string') return value;
-      if(Array.isArray(value)) return value.map(textFromContent).filter(Boolean).join('');
-      if(!value||typeof value!=='object') return '';
-      if(typeof value.text==='string') return value.text;
-      if(typeof value.delta==='string') return value.delta;
-      if(value.content!=null) return textFromContent(value.content);
-      return '';
-    };
-    const toolSummary = (obj) => {
-      const name=obj.toolName||obj.tool_name||obj.name||obj.tool?.name||obj.message?.name||'tool';
-      const args=obj.args??obj.arguments??obj.input??obj.tool?.input??obj.data?.input;
-      if(args==null)return String(name);
-      const value=typeof args==='string'?args:JSON.stringify(args);
-      return String(name)+'\n'+value;
-    };
+    const semanticTypes = new Set([
+      'agent.message.started','agent.message.delta','agent.message.completed',
+      'agent.thinking.started','agent.thinking.delta','agent.thinking.completed',
+      'agent.tool.started','agent.tool.update','agent.tool.completed'
+    ]);
+
     function conversationItems(events){
       const items=[];
-      let partial=null;
-      const push=(item)=>{
-        if(!item?.text)return;
-        const previous=items.at(-1);
-        if(previous&&previous.role===item.role&&previous.kind==='message'&&item.kind==='message'&&Math.abs(Date.parse(item.at)-Date.parse(previous.at))<3000){previous.text+=item.text;previous.partial=previous.partial||item.partial;return;}
-        items.push(item);
+      const semantic = events.some(e => semanticTypes.has(e.type));
+      let assistant=null;
+      let thinking=null;
+      const push=(item)=>{if(item?.text)items.push(item);};
+      const append=(current,role,text,at,kind='message')=>{
+        if(!text)return current;
+        if(!current){current={kind,role,text:'',at,partial:true};items.push(current);}
+        current.text+=text;
+        return current;
       };
+
       for(const event of events){
-        if(event.type==='agent.user_message'){push({kind:'message',role:'user',text:String(event.data?.text||''),at:event.at});continue;}
-        if(event.type==='agent.message'){push({kind:'message',role:String(event.data?.role||'assistant'),text:String(event.data?.text||''),at:event.at});continue;}
-        if(event.type==='agent.tool.started'){push({kind:'tool',role:'tool',text:String(event.data?.summary||event.data?.name||'tool'),at:event.at});continue;}
-        if(event.type==='agent.tool.completed'){const suffix=event.data?.error?'\nERROR: '+event.data.error:event.data?.result?'\n'+String(event.data.result).slice(0,2000):'';push({kind:'tool',role:'tool',text:String(event.data?.summary||event.data?.name||'tool')+suffix,at:event.at});continue;}
         if(event.type==='agent.stderr'){push({kind:'stderr',role:'stderr',text:String(event.data?.text||''),at:event.at});continue;}
-        if(event.type!=='agent.output')continue;
-        const raw=String(event.data?.text||'');
-        const obj=safeJson(raw);
-        if(!obj)continue;
-        const type=String(obj.type||obj.event||'').toLowerCase();
-        if(type==='message_end'||type==='message'){const msg=obj.message||obj;const role=String(msg.role||obj.role||'assistant');const text=textFromContent(msg.content??obj.content??obj.text);if(text){partial=null;push({kind:'message',role,text,at:event.at});}continue;}
-        if(type==='message_update'){
-          const delta=obj.assistantMessageEvent?.delta??obj.delta?.text??obj.delta??obj.text;
-          const text=textFromContent(delta);
-          if(text){if(!partial){partial={kind:'message',role:'assistant',text:'',at:event.at,partial:true};items.push(partial)}partial.text+=text;}
+        if(semantic){
+          if(event.type==='agent.message.started'){
+            if(event.data?.role==='assistant') assistant=null;
+            continue;
+          }
+          if(event.type==='agent.message.delta'){
+            assistant=append(assistant,'assistant',String(event.data?.text||''),event.at);
+            continue;
+          }
+          if(event.type==='agent.message.completed'){
+            const role=String(event.data?.role||'assistant');
+            const text=String(event.data?.text||'');
+            if(role==='user') push({kind:'message',role:'user',text,at:event.at});
+            else if(role==='assistant') {
+              if(assistant){assistant.partial=false;assistant=null;}
+              else push({kind:'message',role:'assistant',text,at:event.at});
+            }
+            continue;
+          }
+          if(event.type==='agent.thinking.started'){thinking=null;continue;}
+          if(event.type==='agent.thinking.delta'){
+            thinking=append(thinking,'thinking',String(event.data?.text||''),event.at,'thinking');
+            continue;
+          }
+          if(event.type==='agent.thinking.completed'){
+            if(thinking){thinking.partial=false;thinking=null;}
+            else if(event.data?.text) push({kind:'thinking',role:'thinking',text:String(event.data.text),at:event.at});
+            continue;
+          }
+          if(event.type==='agent.tool.started'){
+            const args=event.data?.args==null?'':typeof event.data.args==='string'?event.data.args:JSON.stringify(event.data.args,null,2);
+            push({kind:'tool',role:'tool',text:String(event.data?.name||'tool')+(args?'\n'+args:''),at:event.at,partial:true});
+            continue;
+          }
+          if(event.type==='agent.tool.update'){
+            push({kind:'tool',role:'tool',text:String(event.data?.name||'tool')+' · update\n'+String(event.data?.text||''),at:event.at,partial:true});
+            continue;
+          }
+          if(event.type==='agent.tool.completed'){
+            const result=String(event.data?.result||'');
+            const error=String(event.data?.error||'');
+            push({kind:'tool',role:'tool',text:String(event.data?.name||'tool')+(result?'\n'+result.slice(0,4000):'')+(error?'\nERROR: '+error:''),at:event.at});
+            continue;
+          }
           continue;
         }
-        if(type.includes('tool_execution_start')||type.includes('tool_call_start')||type==='tool_call'||type==='tool_use'){partial=null;push({kind:'tool',role:'tool',text:toolSummary(obj),at:event.at});continue;}
-        if(type.includes('tool_execution_end')||type.includes('tool_call_end')||type==='tool_result'){partial=null;const result=textFromContent(obj.result??obj.output??obj.content);push({kind:'tool',role:'tool',text:toolSummary(obj)+(result?'\n'+result.slice(0,2000):''),at:event.at});continue;}
-        const role=String(obj.role||obj.message?.role||obj.data?.role||'');
-        const text=textFromContent(obj.message?.content??obj.content??obj.data?.content??obj.text);
-        if((role==='assistant'||role==='user')&&text){partial=null;push({kind:'message',role,text,at:event.at});}
+
+        // Backward compatibility for runs created before worker-side normalization.
+        if(event.type!=='agent.output')continue;
+        let obj;try{obj=JSON.parse(String(event.data?.text||''));}catch{continue;}
+        const type=String(obj.type||'');
+        if(type==='message_end'){
+          const msg=obj.message||{};
+          const text=Array.isArray(msg.content)?msg.content.map(x=>x?.text||'').join(''):String(msg.content||'');
+          if(text)push({kind:'message',role:String(msg.role||'assistant'),text,at:event.at});
+        } else if(type==='message_update') {
+          const update=obj.assistantMessageEvent||{};
+          if(update.type==='text_delta') assistant=append(assistant,'assistant',String(update.delta||''),event.at);
+          if(update.type==='thinking_delta') thinking=append(thinking,'thinking',String(update.delta||''),event.at,'thinking');
+        }
       }
       return items;
     }
+
+    const agentActivity = () => {
+      const start=find('agent.started');
+      if(!start)return null;
+      const end=state.events.find((e)=>['agent.completed','agent.timeout','run.cancelled'].includes(e.type));
+      const elapsed=(end?eventTime(end):Date.now())-eventTime(start);
+      const overall=Number(start.data?.timeoutMs||state.run.spec.agent.timeoutMs||900000);
+      const startup=Number(start.data?.startupTimeoutMs||0);
+      const idle=Number(start.data?.idleTimeoutMs||0);
+      const activityEvents=state.events.filter(e=>e.type.startsWith('agent.')&&!['agent.started'].includes(e.type));
+      const last=activityEvents.at(-1);
+      const lastAgo=last?Math.max(0,Date.now()-eventTime(last)):elapsed;
+      return {elapsed,overall,startup,idle,lastAgo,lastType:last?.type||'waiting for first event',pct:Math.min(100,Math.max(0,elapsed/overall*100))};
+    };
+
     const conversationHtml = () => {
       const items=conversationItems(state.events);
-      if(!items.length)return '<div class="conversation-empty">No agent messages captured yet. Raw run events are still available below.</div>';
+      if(!items.length)return '<div class="conversation-empty">Waiting for Pi activity…</div>';
       return items.map((item)=>'<div class="message '+esc(item.role)+(item.partial?' partial':'')+'"><div class="message-head"><span class="role">'+esc(item.role)+(item.partial?' · live':'')+'</span><span class="time">'+new Date(item.at).toLocaleTimeString()+'</span></div><div class="body">'+esc(item.text)+'</div></div>').join('');
     };
 
     function render(){
       if(!state.run)return;
-      const r=state.run,b=agentBudget(),health=workerHealth();
-      const phases=[['prepare',phase('subject.preparing',['subject.ready'])],['compile',phase('nazare.compile.started',['nazare.compile.completed'])],['agent',phase('agent.started',['agent.completed','agent.timeout','run.cancelled'])],['verify',phase('verification.started',['verification.completed','run.completed','run.failed'])]];
+      const r=state.run,a=agentActivity(),health=workerHealth();
+      const phases=[['prepare',phase('subject.preparing',['subject.ready'])],['compile',phase('nazare.compile.started',['nazare.compile.completed'])],['agent',phase('agent.started',['agent.completed','agent.timeout','run.cancelled'])],['verify',phase('verification.started',['run.completed','run.failed'])]];
       const phaseHtml=phases.map(([name,ms])=>'<div class="phase"><span>'+name+'</span><strong>'+fmt(ms)+'</strong></div>').join('');
-      const artifactHtml=state.artifacts.length?state.artifacts.map((a)=>'<div class="artifact"><strong>'+esc(a.type)+'</strong><div class="muted">'+esc(a.key)+' · '+a.bytes+' bytes</div></div>').join(''):'<div class="muted">No artifacts yet</div>';
+      const artifactHtml=state.artifacts.length?state.artifacts.map((x)=>'<div class="artifact"><strong>'+esc(x.type)+'</strong><div class="muted">'+esc(x.key)+' · '+x.bytes+' bytes</div></div>').join(''):'<div class="muted">No artifacts yet</div>';
       const timeline=state.events.length?state.events.map(eventLine).join('\n'):'No events yet';
-      document.querySelector('#app').innerHTML='<div class="stack"><div class="card"><div class="row"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="pill">'+esc(r.spec.arm)+'</span></div><strong>'+fmt(r.elapsedMs)+'</strong></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.experiment.path)+'</div>'+(b?'<h2 style="margin-top:18px">Model budget</h2><div class="row"><span>'+fmt(b.elapsed)+' / '+fmt(b.budget)+'</span><span>'+fmt(b.remaining)+' remaining</span></div><div class="progress" style="margin-top:8px"><span style="width:'+b.pct+'%"></span></div>':'')+(r.error?'<h2 style="margin-top:18px">Error</h2><div class="error"><strong>'+esc(r.errorCode||'error')+'</strong>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:16px"><button id="cancel" class="button danger">Cancel run</button></div>':'')+'</div><div class="grid"><div class="card"><h2>Execution</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+health+'">'+health+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span></div><h2 style="margin-top:18px">Phase timings</h2>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+artifactHtml+'</div></div><div class="card"><div class="row"><h2>Agent conversation</h2><span id="stream-state" class="pill">'+(terminal.has(r.status)?'finished':'streaming')+'</span></div><div class="section-note">Messages and tool activity reconstructed from the durable Pi event stream.</div><div id="conversation" class="conversation">'+conversationHtml()+'</div></div><details class="card"><summary style="cursor:pointer;font-weight:700">Raw event timeline</summary><div id="timeline" class="timeline" style="margin-top:12px">'+esc(timeline)+'</div></details></div>';
+      const activityHtml=a?'<h2 style="margin-top:18px">Agent activity</h2><div class="row"><span>'+fmt(a.elapsed)+' / '+fmt(a.overall)+'</span><span>last activity '+fmt(a.lastAgo)+' ago</span></div><div class="progress" style="margin-top:8px"><span style="width:'+a.pct+'%"></span></div><div class="meta">startup timeout '+fmt(a.startup)+' · idle timeout '+fmt(a.idle)+' · '+esc(a.lastType)+'</div>':'';
+      document.querySelector('#app').innerHTML='<div class="stack"><div class="card"><div class="row"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="pill">'+esc(r.spec.arm)+'</span></div><strong>'+fmt(r.elapsedMs)+'</strong></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.experiment.path)+'</div>'+activityHtml+(r.error?'<h2 style="margin-top:18px">Error</h2><div class="error"><strong>'+esc(r.errorCode||'error')+'</strong>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:16px"><button id="cancel" class="button danger">Cancel run</button></div>':'')+'</div><div class="grid"><div class="card"><h2>Execution</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+health+'">'+health+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span></div><h2 style="margin-top:18px">Phase timings</h2>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+artifactHtml+'</div></div><div class="card"><div class="row"><h2>Agent conversation</h2><span id="stream-state" class="pill">'+(terminal.has(r.status)?'finished':'streaming')+'</span></div><div class="section-note">Live semantic events normalized by the Wind Tunnel worker. Full raw Pi JSONL remains an artifact.</div><div id="conversation" class="conversation">'+conversationHtml()+'</div></div><details class="card"><summary style="cursor:pointer;font-weight:700">Raw event timeline</summary><div id="timeline" class="timeline" style="margin-top:12px">'+esc(timeline)+'</div></details></div>';
       document.querySelector('#cancel')?.addEventListener('click',async()=>{if(!confirm('Cancel this run?'))return;await fetch('/api/runs/'+id+'/cancel',{method:'POST'});await refresh();});
       const conversation=document.querySelector('#conversation');if(conversation)conversation.scrollTop=conversation.scrollHeight;
     }
+
     async function refresh(){
-      const [runResponse,eventResponse,artifactResponse]=await Promise.all([fetch('/api/runs/'+id),fetch('/api/runs/'+id+'/events?limit=500'),fetch('/api/runs/'+id+'/artifacts')]);
+      const [runResponse,eventResponse,artifactResponse]=await Promise.all([fetch('/api/runs/'+id),fetch('/api/runs/'+id+'/events?limit=1000'),fetch('/api/runs/'+id+'/artifacts')]);
       if(!runResponse.ok)return;
       state={run:await runResponse.json(),events:(await eventResponse.json()).events,artifacts:(await artifactResponse.json()).artifacts};
       render();
     }
+
     render();
     if(state.run&&!terminal.has(state.run.status)){
       const source=new EventSource('/api/runs/'+id+'/stream');
@@ -117,7 +166,7 @@ const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
       source.addEventListener('heartbeat',()=>refresh());
       source.addEventListener('terminal',()=>{refresh();source.close();});
       source.onerror=()=>{const el=document.querySelector('#stream-state');if(el)el.textContent='reconnecting';};
-      setInterval(()=>{if(!terminal.has(state.run.status))refresh();},2000);
+      setInterval(()=>{if(!terminal.has(state.run.status))refresh();},1000);
     }
   </script>
 </Layout>
