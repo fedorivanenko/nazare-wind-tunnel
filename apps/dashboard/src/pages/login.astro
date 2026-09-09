@@ -1,0 +1,26 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+<Layout title="Wind Tunnel Login">
+  <section class="login card">
+    <div class="eyebrow">Nazare</div>
+    <h1>Wind Tunnel</h1>
+    <p class="muted">Enter the dashboard access token. The control API token remains server-side.</p>
+    <form id="login">
+      <input name="token" type="password" autocomplete="current-password" autofocus />
+      <button class="button" type="submit">Connect</button>
+      <div id="error" class="error" style="margin-top:10px"></div>
+    </form>
+  </section>
+  <script>
+    const form = document.querySelector('#login');
+    const error = document.querySelector('#error');
+    form?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!(form instanceof HTMLFormElement)) return;
+      const response = await fetch('/api/session', {method:'POST', body:new FormData(form)});
+      if (response.ok) location.href = '/';
+      else if (error) error.textContent = 'Unauthorized';
+    });
+  </script>
+</Layout>

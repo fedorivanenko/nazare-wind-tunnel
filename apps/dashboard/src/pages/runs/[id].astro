@@ -1,0 +1,64 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import {controlJson, type EventsResponse, type ArtifactsResponse} from '../../lib/control';
+import type {RunState} from '@nazare/wind-tunnel-domain';
+
+const id = Astro.params.id ?? '';
+let run: RunState | null = null;
+let events: EventsResponse['events'] = [];
+let artifacts: ArtifactsResponse['artifacts'] = [];
+let loadError = '';
+try {
+  [run, events, artifacts] = await Promise.all([
+    controlJson<RunState>(`/runs/${id}`),
+    controlJson<EventsResponse>(`/runs/${id}/events?limit=500`).then(x => x.events),
+    controlJson<ArtifactsResponse>(`/runs/${id}/artifacts`).then(x => x.artifacts),
+  ]);
+} catch (error) { loadError = error instanceof Error ? error.message : String(error); }
+const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
+---
+<Layout title={`Wind Tunnel ${id.slice(0,8)}`}>
+  <div class="header"><div><div class="eyebrow">Nazare Wind Tunnel</div><h1>Run <span class="meta">{id}</span></h1></div><a class="button" href="/">← Runs</a></div>
+  {loadError ? <div class="card error">{loadError}</div> : <div id="app"></div>}
+  <script type="application/json" id="initial" set:html={initial}></script>
+  <script>
+    const id = location.pathname.split('/').filter(Boolean).at(-1);
+    const terminal = new Set(['completed','failed','cancelled']);
+    const initialEl = document.querySelector('#initial');
+    let state = initialEl?.textContent ? JSON.parse(initialEl.textContent) : {run:null,events:[],artifacts:[]};
+    const esc = (s) => String(s ?? '').replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
+    const fmt = (ms) => ms == null ? '—' : ms < 1000 ? Math.round(ms)+' ms' : (ms/1000).toFixed(ms < 10000 ? 1 : 0)+' s';
+    const eventTime = (e) => Date.parse(e.at);
+    const find = (type) => state.events.find((e) => e.type === type);
+    const phase = (startType,endTypes) => {const start=find(startType); if(!start)return null; const end=state.events.find((e)=>endTypes.includes(e.type)); const stop=end?eventTime(end):(terminal.has(state.run.status)?Date.parse(state.run.finishedAt||state.run.updatedAt):Date.now()); return Math.max(0,stop-eventTime(start));};
+    const agentBudget = () => {const start=find('agent.started');if(!start)return null;const end=state.events.find((e)=>['agent.completed','agent.timeout','run.cancelled'].includes(e.type));const elapsed=(end?eventTime(end):Date.now())-eventTime(start);const budget=state.run.spec.agent.timeoutMs||30000;return {elapsed,budget,remaining:Math.max(0,budget-elapsed),pct:Math.min(100,Math.max(0,elapsed/budget*100))};};
+    const workerHealth = () => terminal.has(state.run.status)||!state.run.workerId?'—':Date.parse(state.run.leaseUntil||0)>Date.now()?'healthy':'stale';
+    const eventLine = (e) => {let detail='';if(e.data?.text)detail='  '+String(e.data.text).replace(/\s+/g,' ').slice(0,500);else if(e.data&&Object.keys(e.data).length)detail='  '+JSON.stringify(e.data).slice(0,500);return new Date(e.at).toLocaleTimeString()+'  '+e.type+detail;};
+    function render(){
+      if(!state.run)return;
+      const r=state.run,b=agentBudget(),health=workerHealth();
+      const phases=[['prepare',phase('subject.preparing',['subject.ready'])],['compile',phase('nazare.compile.started',['nazare.compile.completed'])],['agent',phase('agent.started',['agent.completed','agent.timeout','run.cancelled'])],['verify',phase('verification.started',['verification.completed','run.completed','run.failed'])]];
+      const phaseHtml=phases.map(([name,ms])=>'<div class="phase"><span>'+name+'</span><strong>'+fmt(ms)+'</strong></div>').join('');
+      const artifactHtml=state.artifacts.length?state.artifacts.map((a)=>'<div class="artifact"><strong>'+esc(a.type)+'</strong><div class="muted">'+esc(a.key)+' · '+a.bytes+' bytes</div></div>').join(''):'<div class="muted">No artifacts yet</div>';
+      const timeline=state.events.length?state.events.map(eventLine).join('\n'):'No events yet';
+      document.querySelector('#app').innerHTML='<div class="stack"><div class="card"><div class="row"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="pill">'+esc(r.spec.arm)+'</span></div><strong>'+fmt(r.elapsedMs)+'</strong></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.experiment.path)+'</div>'+(b?'<h2 style="margin-top:18px">Model budget</h2><div class="row"><span>'+fmt(b.elapsed)+' / '+fmt(b.budget)+'</span><span>'+fmt(b.remaining)+' remaining</span></div><div class="progress" style="margin-top:8px"><span style="width:'+b.pct+'%"></span></div>':'')+(r.error?'<h2 style="margin-top:18px">Error</h2><div class="error"><strong>'+esc(r.errorCode||'error')+'</strong>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:16px"><button id="cancel" class="button danger">Cancel run</button></div>':'')+'</div><div class="grid"><div class="card"><h2>Execution</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+health+'">'+health+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span></div><h2 style="margin-top:18px">Phase timings</h2>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+artifactHtml+'</div></div><div class="card"><div class="row"><h2>Live activity</h2><span id="stream-state" class="pill">streaming</span></div><div id="timeline" class="timeline">'+esc(timeline)+'</div></div></div>';
+      document.querySelector('#cancel')?.addEventListener('click',async()=>{if(!confirm('Cancel this run?'))return;await fetch('/api/runs/'+id+'/cancel',{method:'POST'});await refresh();});
+      const timelineEl=document.querySelector('#timeline');if(timelineEl)timelineEl.scrollTop=timelineEl.scrollHeight;
+    }
+    async function refresh(){
+      const [runResponse,eventResponse,artifactResponse]=await Promise.all([fetch('/api/runs/'+id),fetch('/api/runs/'+id+'/events?limit=500'),fetch('/api/runs/'+id+'/artifacts')]);
+      if(!runResponse.ok)return;
+      state={run:await runResponse.json(),events:(await eventResponse.json()).events,artifacts:(await artifactResponse.json()).artifacts};
+      render();
+    }
+    render();
+    if(state.run&&!terminal.has(state.run.status)){
+      const source=new EventSource('/api/runs/'+id+'/stream');
+      source.addEventListener('run',()=>refresh());
+      source.addEventListener('heartbeat',()=>refresh());
+      source.addEventListener('terminal',()=>{refresh();source.close();});
+      source.onerror=()=>{const el=document.querySelector('#stream-state');if(el)el.textContent='reconnecting';};
+      setInterval(()=>{if(!terminal.has(state.run.status))refresh();},2000);
+    }
+  </script>
+</Layout>

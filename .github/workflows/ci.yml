@@ -24,6 +24,7 @@ jobs:
         run: |
           test -f apps/api/src/index.ts
           test -f apps/worker/src/index.ts
+          test -f apps/dashboard/src/pages/index.astro
           test -f packages/subject-manager/src/index.ts
           grep -q "claimNextRun" apps/worker/src/index.ts
           grep -q "ensureSubject" apps/worker/src/index.ts
@@ -36,3 +37,5 @@ jobs:
         run: docker build -f Dockerfile.control -t nazare-wind-tunnel-api:ci .
       - name: Build worker image
         run: docker build -f Dockerfile.worker -t nazare-wind-tunnel-worker:ci .
+      - name: Build dashboard image
+        run: docker build -f Dockerfile.dashboard -t nazare-wind-tunnel-dashboard:ci .
