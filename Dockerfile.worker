@@ -8,6 +8,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY . .
+ENV CI=true
 RUN pnpm install --frozen-lockfile \
   && pnpm --filter @nazare/wind-tunnel-pi exec pi --version >/dev/null
 
