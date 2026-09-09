@@ -1,16 +1,24 @@
 import {randomUUID} from 'node:crypto';
 import {createServer, type IncomingMessage, type ServerResponse} from 'node:http';
-import type {Arm, RunSpec} from '@nazare/wind-tunnel-domain';
-import {createRun, ensureSchema, getRun, listArtifacts} from '@nazare/wind-tunnel-storage';
+import type {Arm, RunLifecycle, RunSpec} from '@nazare/wind-tunnel-domain';
+import {createRun, ensureSchema, getRun, listArtifacts, listEvents, listRuns, requestCancel} from '@nazare/wind-tunnel-storage';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const TOKEN = process.env.WIND_TUNNEL_TOKEN ?? '';
 const MAX_BODY_BYTES = 256_000;
+const MAX_MODEL_TIMEOUT_MS = 30_000;
+const RUN_STATES: RunLifecycle[] = ['queued','preparing','compiling','running','verifying','cancelling','completed','failed','cancelled'];
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(body));
+}
+
+function html(res: ServerResponse, body: string) {
+  res.statusCode = 200;
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.end(body);
 }
 
 function authorized(req: IncomingMessage) {
@@ -34,13 +42,36 @@ function validateArm(value: unknown): Arm {
   return value;
 }
 
+function dashboard() {
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wind Tunnel</title>
+<style>
+body{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;background:#0f1117;color:#e7e9ee;margin:0;padding:24px}main{max-width:1100px;margin:auto}h1{font:600 24px system-ui;margin:0 0 20px}.bar{display:flex;gap:8px;margin-bottom:18px}input,button{background:#181b24;color:#eee;border:1px solid #353949;border-radius:7px;padding:9px 11px}input{flex:1}button{cursor:pointer}.runs{display:grid;gap:8px}.run{border:1px solid #2c3040;border-radius:10px;padding:12px;background:#151821}.top{display:flex;justify-content:space-between;gap:12px}.status{font-weight:700}.running,.preparing,.compiling,.verifying{color:#67a7ff}.completed{color:#71d99d}.failed{color:#ff7070}.cancelled,.cancelling{color:#e5b95d}.meta{color:#9ca3b5;margin-top:6px}.events{white-space:pre-wrap;color:#c8ccd8;background:#0c0e13;border-radius:7px;padding:10px;margin-top:10px;max-height:340px;overflow:auto}.progress{height:5px;background:#2a2e3a;border-radius:4px;margin-top:8px;overflow:hidden}.progress i{display:block;height:100%;background:#67a7ff}.error{color:#ff8c8c;margin-top:8px;white-space:pre-wrap}.small{font-size:12px;color:#8d94a5}</style></head>
+<body><main><h1>Nazare Wind Tunnel</h1><div class="bar"><input id="token" type="password" placeholder="WIND_TUNNEL_TOKEN"><button id="save">Connect</button></div><div id="runs" class="runs"></div></main>
+<script>
+const tokenInput=document.getElementById('token'); tokenInput.value=sessionStorage.wtToken||'';
+document.getElementById('save').onclick=()=>{sessionStorage.wtToken=tokenInput.value;load()};
+const auth=()=>({'Authorization':'Bearer '+(sessionStorage.wtToken||tokenInput.value)});
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...auth(),...(opts.headers||{})}});if(!r.ok)throw new Error(await r.text());return r.json()}
+async function cancel(id){await api('/runs/'+id+'/cancel',{method:'POST'});load()}
+async function events(id){const x=await api('/runs/'+id+'/events?limit=150');return x.events.map(e=>e.at+'  '+e.type+(e.data?.text?'  '+e.data.text:'')).join('\n')}
+async function load(){try{const data=await api('/runs?limit=25');const rows=await Promise.all(data.runs.map(async r=>{let ev='';if(!['completed','failed','cancelled'].includes(r.status))ev=await events(r.runId).catch(()=> '');const elapsed=r.elapsedMs||0;const agentStart=(ev.match(/agent.started/g)||[]).length;const pct=r.status==='running'?Math.min(100,elapsed/300):0;return '<div class="run"><div class="top"><div><span class="status '+r.status+'">'+esc(r.status)+'</span> <span class="small">'+esc(r.runId)+'</span></div><div>'+Math.round(elapsed/100)/10+'s</div></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha.slice(0,10))+' · '+esc(r.spec.arm)+' · '+esc(r.spec.experiment.path)+'</div>'+(r.status==='running'?'<div class="progress"><i style="width:'+pct+'%"></i></div>':'')+(r.error?'<div class="error">'+esc(r.errorCode||'error')+': '+esc(r.error)+'</div>':'')+(!['completed','failed','cancelled'].includes(r.status)?'<button onclick="cancel(\''+r.runId+'\')">Cancel</button>':'')+(ev?'<div class="events">'+esc(ev)+'</div>':'')+'</div>'}));document.getElementById('runs').innerHTML=rows.join('')}catch(e){document.getElementById('runs').innerHTML='<div class="error">'+esc(e)+'</div>'}}
+load();setInterval(load,2000);
+</script></body></html>`;
+}
+
 await ensureSchema();
 
 createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     if (url.pathname === '/health') {
-      json(res, 200, {ok:true, service:'nazare-wind-tunnel-api', version:2});
+      json(res, 200, {ok:true, service:'nazare-wind-tunnel-api', version:3, maxModelTimeoutMs:MAX_MODEL_TIMEOUT_MS});
+      return;
+    }
+    if (url.pathname === '/' || url.pathname === '/wind-tunnel') {
+      html(res, dashboard());
       return;
     }
     if (!authorized(req)) {
@@ -58,6 +89,7 @@ createServer(async (req, res) => {
       if (!/^[0-9a-f]{40}$/i.test(sourceSha)) throw new Error('sourceSha must be a full commit SHA');
       if (!experiment || experiment.startsWith('/') || experiment.includes('..')) throw new Error('experiment must be a safe repo-relative path');
       const now = new Date().toISOString();
+      const requestedTimeout = Number(body.timeoutMs ?? MAX_MODEL_TIMEOUT_MS);
       const spec: RunSpec = {
         runId: randomUUID(),
         subject: {repository, githubSha: sourceSha},
@@ -67,12 +99,61 @@ createServer(async (req, res) => {
           provider: body.provider ? String(body.provider) : null,
           model: body.model ? String(body.model) : null,
           thinking: body.thinking ? String(body.thinking) : null,
-          timeoutMs: Number(body.timeoutMs ?? 15 * 60 * 1000),
+          timeoutMs: Math.min(MAX_MODEL_TIMEOUT_MS, Math.max(1_000, requestedTimeout)),
         },
         createdAt: now,
       };
       const run = await createRun(spec);
-      json(res, 202, {runId: run.runId, status: run.status, repository, sourceSha, experiment, arm});
+      json(res, 202, {runId: run.runId, status: run.status, repository, sourceSha, experiment, arm, modelTimeoutMs:spec.agent.timeoutMs});
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/runs') {
+      const statusRaw = url.searchParams.get('status');
+      const status = statusRaw && RUN_STATES.includes(statusRaw as RunLifecycle) ? statusRaw as RunLifecycle : undefined;
+      const limit = Number(url.searchParams.get('limit') ?? 25);
+      json(res, 200, {runs: await listRuns({limit,status})});
+      return;
+    }
+
+    const cancelMatch = url.pathname.match(/^\/runs\/([0-9a-f-]+)\/cancel$/i);
+    if (req.method === 'POST' && cancelMatch) {
+      const run = await requestCancel(cancelMatch[1]);
+      json(res, 202, {runId:run.runId,status:run.status,cancelRequestedAt:run.cancelRequestedAt});
+      return;
+    }
+
+    const eventMatch = url.pathname.match(/^\/runs\/([0-9a-f-]+)\/events$/i);
+    if (req.method === 'GET' && eventMatch) {
+      const after = Number(url.searchParams.get('after') ?? 0);
+      const limit = Number(url.searchParams.get('limit') ?? 500);
+      json(res, 200, {runId:eventMatch[1],events:await listEvents(eventMatch[1],after,limit)});
+      return;
+    }
+
+    const streamMatch = url.pathname.match(/^\/runs\/([0-9a-f-]+)\/stream$/i);
+    if (req.method === 'GET' && streamMatch) {
+      const runId = streamMatch[1];
+      let after = Number(url.searchParams.get('after') ?? 0);
+      let closed = false;
+      req.on('close', () => { closed = true; });
+      res.writeHead(200, {'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});
+      res.write(`event: ready\ndata: ${JSON.stringify({runId})}\n\n`);
+      while (!closed) {
+        const events = await listEvents(runId, after, 250);
+        for (const event of events) {
+          after = Math.max(after, Number(event.seq ?? 0));
+          res.write(`id: ${event.seq}\nevent: run\ndata: ${JSON.stringify(event)}\n\n`);
+        }
+        const run = await getRun(runId);
+        if (['completed','failed','cancelled'].includes(run.status)) {
+          res.write(`event: terminal\ndata: ${JSON.stringify(run)}\n\n`);
+          res.end();
+          return;
+        }
+        res.write(`event: heartbeat\ndata: ${JSON.stringify({at:new Date().toISOString(),status:run.status,elapsedMs:run.elapsedMs,leaseUntil:run.leaseUntil})}\n\n`);
+        await new Promise(resolve => setTimeout(resolve, 1_000));
+      }
       return;
     }
 
