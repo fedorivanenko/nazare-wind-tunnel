@@ -12,6 +12,12 @@ export type PiRunOptions = {
   signal?: AbortSignal;
   onStdoutLine?: (line: string) => void | Promise<void>;
   onStderrLine?: (line: string) => void | Promise<void>;
+  onSpawn?: (event: {pid:number; executable:string}) => void | Promise<void>;
+  onFirstOutput?: (event: {pid:number; stream:'stdout'|'stderr'; afterMs:number}) => void | Promise<void>;
+  onHeartbeat?: (event: {pid:number; runtimeMs:number; stdoutBytes:number; stderrBytes:number}) => void | Promise<void>;
+  onSignal?: (event: {pid:number; signal:'SIGTERM'|'SIGKILL'; reason:'startup'|'idle'|'overall'|'abort'}) => void | Promise<void>;
+  onError?: (event: {pid:number|null; error:string}) => void | Promise<void>;
+  heartbeatMs?: number;
 };
 
 export type PiTimeoutReason = 'startup' | 'idle' | 'overall' | null;
@@ -92,10 +98,12 @@ export async function runPi(options: PiRunOptions) {
 
   const piBin = process.env.WIND_TUNNEL_PI_BIN ?? 'pi';
   const started = Date.now();
-  return await new Promise<{exitCode:number|null; stdout:string; stderr:string; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
+  return await new Promise<{pid:number|null; exitCode:number|null; signal:NodeJS.Signals|null; stdout:string; stderr:string; stdoutBytes:number; stderrBytes:number; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
     const child = spawn(piBin, args, {cwd: options.cwd, env: {...process.env, PI_SKIP_VERSION_CHECK:'1', PI_TELEMETRY:'0'}});
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let stdoutBuffer = '';
     let stderrBuffer = '';
     let timedOut = false;
@@ -106,6 +114,7 @@ export async function runPi(options: PiRunOptions) {
     let lastActivityAt: string | null = null;
     let idleTimer: NodeJS.Timeout | null = null;
 
+    const notify = (callback: (() => void | Promise<void>) | undefined) => { if (callback) Promise.resolve(callback()).catch(() => {}); };
     const terminate = (reason: 'startup' | 'idle' | 'overall' | 'abort') => {
       if (settled) return;
       if (reason === 'abort') aborted = true;
@@ -113,9 +122,15 @@ export async function runPi(options: PiRunOptions) {
         timedOut = true;
         timeoutReason = reason;
       }
+      const pid=child.pid;
+      if (pid) notify(() => options.onSignal?.({pid,signal:'SIGTERM',reason}));
       child.kill('SIGTERM');
       setTimeout(() => {
-        if (!settled) child.kill('SIGKILL');
+        if (!settled) {
+          const killPid=child.pid;
+          if (killPid) notify(() => options.onSignal?.({pid:killPid,signal:'SIGKILL',reason}));
+          child.kill('SIGKILL');
+        }
       }, 2_000).unref();
     };
 
@@ -126,8 +141,13 @@ export async function runPi(options: PiRunOptions) {
       idleTimer.unref();
     };
 
-    const noteActivity = () => {
-      if (firstOutputMs == null) firstOutputMs = Date.now() - started;
+    const noteActivity = (stream: 'stdout' | 'stderr') => {
+      if (firstOutputMs == null) {
+        const afterMs=Date.now()-started;
+        const pid=child.pid;
+        firstOutputMs=afterMs;
+        if (pid) notify(() => options.onFirstOutput?.({pid,stream,afterMs}));
+      }
       lastActivityAt = new Date().toISOString();
       resetIdleTimer();
     };
@@ -147,19 +167,22 @@ export async function runPi(options: PiRunOptions) {
       else stderrBuffer = buffer;
     };
 
+    child.on('spawn', () => { const pid=child.pid;if(pid)notify(()=>options.onSpawn?.({pid,executable:piBin})); });
     child.stdout?.on('data', chunk => {
-      noteActivity();
+      noteActivity('stdout');
       const text = chunk.toString();
+      stdoutBytes += Buffer.byteLength(text);
       stdout = (stdout + text).slice(-20_000_000);
       emitLines('stdout', text);
     });
     child.stderr?.on('data', chunk => {
-      noteActivity();
+      noteActivity('stderr');
       const text = chunk.toString();
+      stderrBytes += Buffer.byteLength(text);
       stderr = (stderr + text).slice(-20_000_000);
       emitLines('stderr', text);
     });
-    child.on('error', reject);
+    child.on('error', error => {notify(()=>options.onError?.({pid:child.pid??null,error:error.message}));reject(error);});
 
     const onAbort = () => terminate('abort');
     if (options.signal?.aborted) onAbort();
@@ -171,16 +194,22 @@ export async function runPi(options: PiRunOptions) {
       : null;
     overallTimer.unref();
     startupTimer?.unref();
+    const heartbeat = setInterval(() => {
+      const pid=child.pid;
+      if(pid)notify(()=>options.onHeartbeat?.({pid,runtimeMs:Date.now()-started,stdoutBytes,stderrBytes}));
+    }, Math.max(1_000,options.heartbeatMs??5_000));
+    heartbeat.unref();
 
-    child.on('close', exitCode => {
+    child.on('close', (exitCode, signal) => {
       settled = true;
       clearTimeout(overallTimer);
+      clearInterval(heartbeat);
       if (startupTimer) clearTimeout(startupTimer);
       if (idleTimer) clearTimeout(idleTimer);
       options.signal?.removeEventListener('abort', onAbort);
       if (stdoutBuffer && options.onStdoutLine) Promise.resolve(options.onStdoutLine(stdoutBuffer)).catch(() => {});
       if (stderrBuffer && options.onStderrLine) Promise.resolve(options.onStderrLine(stderrBuffer)).catch(() => {});
-      resolve({exitCode, stdout, stderr, durationMs: Date.now() - started, timedOut, timeoutReason, aborted, firstOutputMs, lastActivityAt});
+      resolve({pid:child.pid??null,exitCode,signal,stdout,stderr,stdoutBytes,stderrBytes,durationMs:Date.now()-started,timedOut,timeoutReason,aborted,firstOutputMs,lastActivityAt});
     });
   });
 }
