@@ -37,14 +37,33 @@ async function psql(sql: string) {
 
 function parseState(raw: string): RunState {
   const row = JSON.parse(raw) as {
-    run_id: string; status: RunLifecycle; outcome: RunOutcome; created_at: string; started_at: string | null;
-    finished_at: string | null; updated_at: string; error: string | null; worker_id: string | null;
-    lease_until: string | null; attempts: number; spec: RunSpec;
+    run_id: string;
+    status: RunLifecycle;
+    outcome: RunOutcome;
+    created_at: string;
+    started_at: string | null;
+    finished_at: string | null;
+    updated_at: string;
+    error: string | null;
+    worker_id: string | null;
+    lease_until: string | null;
+    attempts: number;
+    spec: RunSpec;
   };
   return withElapsed({
-    runId: row.run_id, status: row.status, outcome: row.outcome, createdAt: row.created_at, startedAt: row.started_at,
-    finishedAt: row.finished_at, updatedAt: row.updated_at, elapsedMs: 0, error: row.error, workerId: row.worker_id,
-    leaseUntil: row.lease_until, attempts: row.attempts, spec: row.spec,
+    runId: row.run_id,
+    status: row.status,
+    outcome: row.outcome,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+    elapsedMs: 0,
+    error: row.error,
+    workerId: row.worker_id,
+    leaseUntil: row.lease_until,
+    attempts: row.attempts,
+    spec: row.spec,
   });
 }
 
@@ -68,7 +87,8 @@ export async function ensureSchema() {
       worker_id text NULL,
       lease_until timestamptz NULL,
       attempts integer NOT NULL DEFAULT 0,
-      spec jsonb NOT NULL
+      spec jsonb NOT NULL,
+      arms jsonb NULL
     );
     CREATE INDEX IF NOT EXISTS wind_tunnel_runs_claim_idx ON wind_tunnel_runs (status, lease_until, created_at);
     CREATE INDEX IF NOT EXISTS wind_tunnel_runs_subject_idx ON wind_tunnel_runs ((spec->'subject'->>'repository'), (spec->'subject'->>'githubSha'), (spec->'experiment'->>'path'), (spec->>'arm'));
@@ -107,8 +127,8 @@ export async function createRun(spec: RunSpec) {
   `);
   if (duplicate) return getRun(duplicate);
 
-  await psql(`INSERT INTO wind_tunnel_runs (run_id,status,created_at,updated_at,spec)
-    VALUES (${sqlLiteral(spec.runId)}::uuid,'queued',${sqlLiteral(now)}::timestamptz,${sqlLiteral(now)}::timestamptz,${jsonLiteral(spec)});`);
+  await psql(`INSERT INTO wind_tunnel_runs (run_id,status,created_at,updated_at,spec,arms)
+    VALUES (${sqlLiteral(spec.runId)}::uuid,'queued',${sqlLiteral(now)}::timestamptz,${sqlLiteral(now)}::timestamptz,${jsonLiteral(spec)},'{}'::jsonb);`);
   await appendEvent({runId: spec.runId, type: 'run.created', at: now, data: {repository: spec.subject.repository, arm: spec.arm}});
   return getRun(spec.runId);
 }
@@ -170,8 +190,13 @@ export async function registerArtifact(record: ArtifactRecord) {
     ON CONFLICT (run_id,object_key) DO NOTHING;`);
 }
 
-function sha256(value: Buffer | string) { return createHash('sha256').update(value).digest('hex'); }
-function hmac(key: Buffer | string, value: string) { return createHmac('sha256', key).update(value).digest(); }
+function sha256(value: Buffer | string) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function hmac(key: Buffer | string, value: string) {
+  return createHmac('sha256', key).update(value).digest();
+}
 
 function objectUrl(key: string) {
   if (!BUCKET || !ENDPOINT || !ACCESS_KEY || !SECRET_KEY) throw new Error('Wind Tunnel S3 configuration is incomplete');
