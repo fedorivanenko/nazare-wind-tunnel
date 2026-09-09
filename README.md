@@ -1,103 +1,155 @@
 # Nazare Wind Tunnel
 
-Wind Tunnel searches over versions of the **software environment** until a fixed model can solve a frozen task inside a fixed budget.
+Nazare Wind Tunnel is a persistent testing environment for running model-backed experiments against external subject repositories such as `fedorivanenko/nazare-hydrogen`.
 
-The target, task, model, harness, budget, and verifier stay fixed. Only `environment/` changes.
+The Wind Tunnel repository contains the testing machinery. Subject repositories remain separate and are materialized lazily into a persistent Railway volume by repository + exact commit SHA.
 
 ## Architecture
 
 ```text
-ChatGPT
-  |
-  | MCP
-  v
-persistent Railway service
-  |
-  +-- /workspace/target        nazare-hydrogen @ WIND_TUNNEL_TARGET_SHA
-  |      node_modules prepared once and kept warm
-  |
-  +-- /workspace/environment   clone of this repo, checked out at env/* ref
-  |
-  +-- /workspace/runs          persistent run artifacts
-  |
-  +-- fixed runner + benchmark config from deployed main/core commit
+GitHub PR in subject repo
+        |
+        | manual workflow
+        v
+Wind Tunnel API (Railway)
+        |
+        v
+Postgres queue
+        |
+        v
+Wind Tunnel worker (Railway)
+        |
+        v
+persistent /workspace subject cache
+        |
+        +-- repos/<owner>/<repo>/.git
+        +-- repos/<owner>/<repo>/node_modules
+        +-- pnpm-store
+        +-- .wind-tunnel/subjects
 ```
 
-A run does exactly this:
+A run is one arm only: `raw` or `nazare`. Historical comparisons are queries over Postgres; execution does not couple two arms together.
+
+## pnpm monorepo
 
 ```text
-resolve env branch -> exact SHA
-reset target -> frozen SHA
-project environment/ -> target/.nazare/
-run Pi under fixed time/token/tool-call budget
-run deterministic checkers
-save patch + transcript + metrics + verifier output
+apps/
+  api/                    public queue/status API
+  worker/                 private long-running experiment worker
+
+packages/
+  domain/                 run contracts and lifecycle
+  storage/                Postgres queue + S3 artifacts
+  subject-manager/        persistent repo cache + dependency reuse
+  pi/                     fixed Pi harness adapter
 ```
 
-## What is fixed
+`nazare-hydrogen` is not part of this monorepo. It is an external experiment subject.
 
-`benchmark/config.json` owns the controls:
+## Run request
 
-- task
-- model/provider/thinking
-- hard wall-clock budget
-- hard tool-call budget
-- token budget when Pi exposes usage in JSON events
-- allowed Pi tools
-- deterministic checkers
+```http
+POST /runs
+Authorization: Bearer $WIND_TUNNEL_TOKEN
+Content-Type: application/json
 
-Environment branches must not change benchmark controls for a run. They are resolved only for the contents of `environment/`.
+{
+  "repository": "fedorivanenko/nazare-hydrogen",
+  "sourceSha": "<exact 40-char PR HEAD SHA>",
+  "experiment": ".wind-tunnel/hydrogen-operability/experiment.json",
+  "arm": "nazare"
+}
+```
 
-## What changes
+The API stores the immutable request in Postgres and returns immediately.
 
-Use branches for environment strategies, for example:
+## Persistent subject cache
+
+On the first run for a repository, the worker clones it into:
 
 ```text
-env/current
-env/minimal
-env/registry
-env/projection
-env/repair-spec
+/workspace/repos/<owner>/<repo>
 ```
 
-Each run records the exact commit SHA behind the supplied environment ref.
-
-## MCP
-
-The deployed service exposes only:
-
-- `workspace_status()`
-- `run_test(environmentRef?)`
-- `get_run(runId)`
-- `get_latest_run()`
-- `list_runs(limit?)`
-
-## Required Railway configuration
-
-Mount one persistent volume at `/workspace` and set:
+Later runs reuse the same clone and `node_modules`:
 
 ```text
-WIND_TUNNEL_TOKEN=...
-WIND_TUNNEL_TARGET_SHA=<exact 40-char nazare-hydrogen SHA>
-WIND_TUNNEL_TARGET_REPO=fedorivanenko/nazare-hydrogen
-WIND_TUNNEL_ENV_REPO=fedorivanenko/nazare-wind-tunnel
-WIND_TUNNEL_ENV_REF=env/current
-AI_GATEWAY_API_KEY=...
+git fetch --prune origin
+git reset --hard <sourceSha>
+git clean -fdx -e node_modules/
 ```
 
-Build with `Dockerfile.control`. There is no worker, Postgres, S3, queue, or per-run dependency install in the active design.
-
-On service startup the target is cloned/reset and `npm ci` is run only when the frozen target lockfile does not match the prepared `node_modules` marker. Subsequent runs reuse the prepared dependencies.
-
-## Iteration loop
+The worker requires `pnpm-lock.yaml`. It hashes the lockfile and only runs:
 
 ```text
-edit environment branch
-commit
-run_test("env/my-idea")
-inspect result + patch + transcript
-change environment
-repeat
+pnpm install --frozen-lockfile --store-dir /workspace/pnpm-store
 ```
 
-The optimization target is **verified task success inside the fixed budget**.
+when dependencies are missing or the lockfile hash changed.
+
+## Railway deployment
+
+Use the same GitHub repository for two Railway services.
+
+### API
+
+```text
+Dockerfile: Dockerfile.control
+start: pnpm api
+public: yes
+health: /health
+```
+
+### Worker
+
+```text
+Dockerfile: Dockerfile.worker
+start: pnpm worker
+public: no
+persistent volume: /workspace
+concurrency: 1 per worker
+```
+
+Shared infrastructure:
+
+- Postgres for queue, lifecycle and searchable metrics
+- S3-compatible artifact bucket for transcripts, patches and verifier output
+
+Hydrogen changes never redeploy Wind Tunnel. Only changes to this repository trigger Railway rebuilds.
+
+## Required variables
+
+Both API and worker:
+
+```text
+DATABASE_URL
+WIND_TUNNEL_TOKEN
+WIND_TUNNEL_S3_BUCKET
+WIND_TUNNEL_S3_ENDPOINT
+WIND_TUNNEL_S3_REGION
+WIND_TUNNEL_S3_ACCESS_KEY
+WIND_TUNNEL_S3_SECRET_KEY
+```
+
+Worker additionally uses:
+
+```text
+WIND_TUNNEL_WORKSPACE=/workspace
+WIND_TUNNEL_PNPM_STORE=/workspace/pnpm-store
+```
+
+Model/provider credentials required by Pi also belong on the worker service.
+
+## CI
+
+Wind Tunnel CI is automatic, cheap and deterministic:
+
+```text
+pnpm install
+pnpm typecheck
+pnpm test
+build API image
+build worker image
+```
+
+Subject experiments remain manual and model-backed.

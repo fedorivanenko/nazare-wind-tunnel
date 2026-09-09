@@ -1,16 +1,16 @@
 {
   "name": "nazare-wind-tunnel",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
+  "packageManager": "pnpm@10.17.1",
   "scripts": {
-    "start": "tsx src/workstation-mcp.ts",
-    "mcp": "tsx src/workstation-mcp.ts",
-    "test": "tsx --test src/*.test.ts",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1"
+    "start": "pnpm --filter @nazare/wind-tunnel-api start",
+    "api": "pnpm --filter @nazare/wind-tunnel-api start",
+    "worker": "pnpm --filter @nazare/wind-tunnel-worker start",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @nazare/wind-tunnel-domain test",
+    "ci": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

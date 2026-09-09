@@ -1,0 +1,15 @@
+{
+  "name": "@nazare/wind-tunnel-domain",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}
