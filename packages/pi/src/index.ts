@@ -130,7 +130,7 @@ export function normalizePiJsonLine(line: string): PiSemanticEvent[] {
 }
 
 export async function runPi(options: PiRunOptions) {
-  const args = ['--mode','json','--verbose','-p','--no-session','--no-approve'];
+  const args = ['--mode','json','--verbose','--offline','-p','--no-session','--no-approve'];
   if (options.provider) args.push('--provider', options.provider);
   if (options.model) args.push('--model', options.model);
   if (options.thinking) args.push('--thinking', options.thinking);
