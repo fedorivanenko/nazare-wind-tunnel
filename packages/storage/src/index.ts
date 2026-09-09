@@ -45,6 +45,8 @@ function parseState(raw: string): RunState {
     finished_at: string | null;
     updated_at: string;
     error: string | null;
+    error_code: string | null;
+    cancel_requested_at: string | null;
     worker_id: string | null;
     lease_until: string | null;
     attempts: number;
@@ -60,6 +62,8 @@ function parseState(raw: string): RunState {
     updatedAt: row.updated_at,
     elapsedMs: 0,
     error: row.error,
+    errorCode: row.error_code,
+    cancelRequestedAt: row.cancel_requested_at,
     workerId: row.worker_id,
     leaseUntil: row.lease_until,
     attempts: row.attempts,
@@ -70,7 +74,8 @@ function parseState(raw: string): RunState {
 const STATE_JSON = `json_build_object(
   'run_id', run_id, 'status', status, 'outcome', outcome, 'created_at', created_at,
   'started_at', started_at, 'finished_at', finished_at, 'updated_at', updated_at,
-  'error', error, 'worker_id', worker_id, 'lease_until', lease_until, 'attempts', attempts, 'spec', spec
+  'error', error, 'error_code', error_code, 'cancel_requested_at', cancel_requested_at,
+  'worker_id', worker_id, 'lease_until', lease_until, 'attempts', attempts, 'spec', spec
 )::text`;
 
 export async function ensureSchema() {
@@ -84,12 +89,16 @@ export async function ensureSchema() {
       finished_at timestamptz NULL,
       updated_at timestamptz NOT NULL DEFAULT now(),
       error text NULL,
+      error_code text NULL,
+      cancel_requested_at timestamptz NULL,
       worker_id text NULL,
       lease_until timestamptz NULL,
       attempts integer NOT NULL DEFAULT 0,
       spec jsonb NOT NULL,
       arms jsonb NULL
     );
+    ALTER TABLE wind_tunnel_runs ADD COLUMN IF NOT EXISTS error_code text NULL;
+    ALTER TABLE wind_tunnel_runs ADD COLUMN IF NOT EXISTS cancel_requested_at timestamptz NULL;
     CREATE INDEX IF NOT EXISTS wind_tunnel_runs_claim_idx ON wind_tunnel_runs (status, lease_until, created_at);
     CREATE INDEX IF NOT EXISTS wind_tunnel_runs_subject_idx ON wind_tunnel_runs ((spec->'subject'->>'repository'), (spec->'subject'->>'githubSha'), (spec->'experiment'->>'path'), (spec->>'arm'));
 
@@ -100,6 +109,7 @@ export async function ensureSchema() {
       at timestamptz NOT NULL,
       data jsonb NOT NULL DEFAULT '{}'::jsonb
     );
+    CREATE INDEX IF NOT EXISTS wind_tunnel_events_run_seq_idx ON wind_tunnel_events (run_id, seq);
 
     CREATE TABLE IF NOT EXISTS wind_tunnel_artifacts (
       run_id uuid NOT NULL REFERENCES wind_tunnel_runs(run_id) ON DELETE CASCADE,
@@ -139,10 +149,20 @@ export async function getRun(runId: string) {
   return parseState(raw);
 }
 
+export async function listRuns(input: {limit?: number; status?: RunLifecycle} = {}) {
+  const limit = Math.min(100, Math.max(1, Number(input.limit ?? 25)));
+  const where = input.status ? `WHERE status=${sqlLiteral(input.status)}` : '';
+  const raw = await psql(`SELECT COALESCE(json_agg(state ORDER BY created_at DESC),'[]'::json)::text FROM (
+    SELECT ${STATE_JSON} AS state, created_at FROM wind_tunnel_runs ${where} ORDER BY created_at DESC LIMIT ${limit}
+  ) rows;`);
+  const parsed = JSON.parse(raw || '[]') as string[];
+  return parsed.map(parseState);
+}
+
 export async function claimNextRun(workerId: string) {
   const raw = await psql(`WITH candidate AS (
       SELECT run_id FROM wind_tunnel_runs
-      WHERE status='queued' OR (status NOT IN ('completed','failed','cancelled') AND lease_until IS NOT NULL AND lease_until < now())
+      WHERE status='queued' OR (status NOT IN ('completed','failed','cancelled','cancelling') AND lease_until IS NOT NULL AND lease_until < now())
       ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
     ), claimed AS (
       UPDATE wind_tunnel_runs r SET worker_id=${sqlLiteral(workerId)}, lease_until=now()+interval '${Math.max(30, LEASE_SECONDS)} seconds',
@@ -159,13 +179,34 @@ export async function renewLease(runId: string, workerId: string) {
   if (!raw) throw new Error(`Lease lost for run ${runId}`);
 }
 
+export async function requestCancel(runId: string) {
+  const now = new Date().toISOString();
+  const raw = await psql(`UPDATE wind_tunnel_runs SET
+      cancel_requested_at=COALESCE(cancel_requested_at,${sqlLiteral(now)}::timestamptz),
+      status=CASE WHEN status IN ('completed','failed','cancelled') THEN status ELSE 'cancelling' END,
+      updated_at=now()
+    WHERE run_id=${sqlLiteral(runId)}::uuid RETURNING ${STATE_JSON};`);
+  if (!raw) throw new Error(`Run not found: ${runId}`);
+  const state = parseState(raw);
+  if (!['completed','failed','cancelled'].includes(state.status)) {
+    await appendEvent({runId,type:'run.cancel.requested',at:now,data:{}});
+  }
+  return state;
+}
+
+export async function isCancellationRequested(runId: string) {
+  const raw = await psql(`SELECT CASE WHEN cancel_requested_at IS NOT NULL OR status='cancelling' THEN '1' ELSE '0' END
+    FROM wind_tunnel_runs WHERE run_id=${sqlLiteral(runId)}::uuid;`);
+  return raw === '1';
+}
+
 export async function saveRun(state: RunState) {
   const now = new Date().toISOString();
   const terminal = ['completed','failed','cancelled'].includes(state.status);
   const finishedAt = terminal ? (state.finishedAt ?? now) : state.finishedAt;
   const raw = await psql(`UPDATE wind_tunnel_runs SET status=${sqlLiteral(state.status)}, outcome=${sqlLiteral(state.outcome)},
     started_at=${sqlLiteral(state.startedAt)}::timestamptz, finished_at=${sqlLiteral(finishedAt)}::timestamptz,
-    updated_at=${sqlLiteral(now)}::timestamptz, error=${sqlLiteral(state.error)},
+    updated_at=${sqlLiteral(now)}::timestamptz, error=${sqlLiteral(state.error)}, error_code=${sqlLiteral(state.errorCode)},
     lease_until=CASE WHEN ${terminal ? 'TRUE' : 'FALSE'} THEN NULL ELSE lease_until END
     WHERE run_id=${sqlLiteral(state.runId)}::uuid RETURNING ${STATE_JSON};`);
   if (!raw) throw new Error(`Run not found: ${state.runId}`);
@@ -173,8 +214,19 @@ export async function saveRun(state: RunState) {
 }
 
 export async function appendEvent(event: RunEvent) {
-  await psql(`INSERT INTO wind_tunnel_events (run_id,type,at,data)
-    VALUES (${sqlLiteral(event.runId)}::uuid,${sqlLiteral(event.type)},${sqlLiteral(event.at)}::timestamptz,${jsonLiteral(event.data ?? {})});`);
+  const raw = await psql(`INSERT INTO wind_tunnel_events (run_id,type,at,data)
+    VALUES (${sqlLiteral(event.runId)}::uuid,${sqlLiteral(event.type)},${sqlLiteral(event.at)}::timestamptz,${jsonLiteral(event.data ?? {})}) RETURNING seq::text;`);
+  return Number(raw);
+}
+
+export async function listEvents(runId: string, after = 0, limit = 500) {
+  const safeAfter = Math.max(0, Number(after) || 0);
+  const safeLimit = Math.min(1000, Math.max(1, Number(limit) || 500));
+  const raw = await psql(`SELECT COALESCE(json_agg(json_build_object(
+      'seq',seq,'runId',run_id::text,'type',type,'at',at,'data',data
+    ) ORDER BY seq),'[]'::json)::text
+    FROM (SELECT * FROM wind_tunnel_events WHERE run_id=${sqlLiteral(runId)}::uuid AND seq>${safeAfter} ORDER BY seq LIMIT ${safeLimit}) e;`);
+  return JSON.parse(raw || '[]') as RunEvent[];
 }
 
 export async function listArtifacts(runId: string) {
