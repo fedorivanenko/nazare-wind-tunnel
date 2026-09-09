@@ -7,6 +7,9 @@ export type PiRunOptions = {
   model?: string;
   thinking?: string;
   timeoutMs: number;
+  signal?: AbortSignal;
+  onStdoutLine?: (line: string) => void | Promise<void>;
+  onStderrLine?: (line: string) => void | Promise<void>;
 };
 
 export async function runPi(options: PiRunOptions) {
@@ -18,22 +21,65 @@ export async function runPi(options: PiRunOptions) {
 
   const piBin = process.env.WIND_TUNNEL_PI_BIN ?? 'pi';
   const started = Date.now();
-  return await new Promise<{exitCode:number|null; stdout:string; stderr:string; durationMs:number; timedOut:boolean}>((resolve, reject) => {
+  return await new Promise<{exitCode:number|null; stdout:string; stderr:string; durationMs:number; timedOut:boolean; aborted:boolean}>((resolve, reject) => {
     const child = spawn(piBin, args, {cwd: options.cwd, env: {...process.env, PI_SKIP_VERSION_CHECK:'1', PI_TELEMETRY:'0'}});
     let stdout = '';
     let stderr = '';
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
     let timedOut = false;
-    child.stdout?.on('data', chunk => { stdout = (stdout + chunk.toString()).slice(-20_000_000); });
-    child.stderr?.on('data', chunk => { stderr = (stderr + chunk.toString()).slice(-20_000_000); });
-    child.on('error', reject);
-    const timer = setTimeout(() => {
-      timedOut = true;
+    let aborted = false;
+    let settled = false;
+
+    const emitLines = (kind: 'stdout' | 'stderr', chunk: string) => {
+      if (kind === 'stdout') stdoutBuffer += chunk;
+      else stderrBuffer += chunk;
+      let buffer = kind === 'stdout' ? stdoutBuffer : stderrBuffer;
+      const callback = kind === 'stdout' ? options.onStdoutLine : options.onStderrLine;
+      while (buffer.includes('\n')) {
+        const index = buffer.indexOf('\n');
+        const line = buffer.slice(0,index);
+        buffer = buffer.slice(index + 1);
+        if (line && callback) Promise.resolve(callback(line)).catch(() => {});
+      }
+      if (kind === 'stdout') stdoutBuffer = buffer;
+      else stderrBuffer = buffer;
+    };
+
+    const terminate = (reason: 'timeout' | 'abort') => {
+      if (settled) return;
+      if (reason === 'timeout') timedOut = true;
+      else aborted = true;
       child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
-    }, options.timeoutMs);
+      setTimeout(() => {
+        if (!settled) child.kill('SIGKILL');
+      }, 2_000).unref();
+    };
+
+    child.stdout?.on('data', chunk => {
+      const text = chunk.toString();
+      stdout = (stdout + text).slice(-20_000_000);
+      emitLines('stdout', text);
+    });
+    child.stderr?.on('data', chunk => {
+      const text = chunk.toString();
+      stderr = (stderr + text).slice(-20_000_000);
+      emitLines('stderr', text);
+    });
+    child.on('error', reject);
+
+    const onAbort = () => terminate('abort');
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener('abort', onAbort, {once:true});
+
+    const timer = setTimeout(() => terminate('timeout'), options.timeoutMs);
     child.on('close', exitCode => {
+      settled = true;
       clearTimeout(timer);
-      resolve({exitCode, stdout, stderr, durationMs: Date.now() - started, timedOut});
+      options.signal?.removeEventListener('abort', onAbort);
+      if (stdoutBuffer && options.onStdoutLine) Promise.resolve(options.onStdoutLine(stdoutBuffer)).catch(() => {});
+      if (stderrBuffer && options.onStderrLine) Promise.resolve(options.onStderrLine(stderrBuffer)).catch(() => {});
+      resolve({exitCode, stdout, stderr, durationMs: Date.now() - started, timedOut, aborted});
     });
   });
 }

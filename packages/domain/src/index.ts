@@ -1,5 +1,5 @@
 export type Arm = 'raw' | 'nazare';
-export type RunLifecycle = 'queued' | 'preparing' | 'running' | 'verifying' | 'completed' | 'failed' | 'cancelled';
+export type RunLifecycle = 'queued' | 'preparing' | 'compiling' | 'running' | 'verifying' | 'cancelling' | 'completed' | 'failed' | 'cancelled';
 export type RunOutcome = 'pass' | 'fail' | 'inconclusive' | null;
 
 export type VerificationSpec = {
@@ -46,6 +46,8 @@ export type RunState = {
   updatedAt: string;
   elapsedMs: number;
   error: string | null;
+  errorCode: string | null;
+  cancelRequestedAt: string | null;
   workerId: string | null;
   leaseUntil: string | null;
   attempts: number;
