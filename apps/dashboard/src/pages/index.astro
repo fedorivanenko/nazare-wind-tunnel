@@ -1,0 +1,46 @@
+---
+import Layout from '../layouts/Layout.astro';
+import {controlJson, type RunsResponse} from '../lib/control';
+
+let runs = [];
+let loadError = '';
+try {
+  runs = (await controlJson<RunsResponse>('/runs?limit=30')).runs;
+} catch (error) {
+  loadError = error instanceof Error ? error.message : String(error);
+}
+const terminal = new Set(['completed','failed','cancelled']);
+const workerHealth = (run) => terminal.has(run.status) || !run.workerId ? '—' : Date.parse(run.leaseUntil ?? '') > Date.now() ? 'healthy' : 'stale';
+const fmt = (ms) => ms < 1000 ? `${Math.round(ms)} ms` : `${(ms/1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+---
+<Layout>
+  <div class="header">
+    <div><div class="eyebrow">Nazare</div><h1>Wind Tunnel</h1></div>
+    <a class="button" href="/status">System status</a>
+  </div>
+  {loadError ? <div class="card error">{loadError}</div> : runs.length === 0 ? <div class="empty">No runs yet.</div> : (
+    <section>
+      <h2>Recent runs</h2>
+      <div class="runs" id="runs">
+        {runs.map((run) => (
+          <a class="run" href={`/runs/${run.runId}`}>
+            <div class="row"><div><span class={`status ${run.status}`}>{run.status}</span> <span class="meta">{run.runId}</span></div><strong>{fmt(run.elapsedMs)}</strong></div>
+            <div class="meta">{run.spec.subject.repository} @ {run.spec.subject.githubSha.slice(0,10)} · {run.spec.arm} · {run.spec.experiment.path}</div>
+            <div class="meta">worker: <span class={workerHealth(run)}>{workerHealth(run)}</span>{run.errorCode ? ` · ${run.errorCode}` : ''}</div>
+          </a>
+        ))}
+      </div>
+    </section>
+  )}
+  <script>
+    setInterval(async () => {
+      if (document.visibilityState !== 'visible') return;
+      const response = await fetch('/api/runs?limit=30');
+      if (!response.ok) return;
+      const data = await response.json();
+      const current = JSON.stringify([...document.querySelectorAll('.run')].map((x) => x.getAttribute('href')));
+      const next = JSON.stringify(data.runs.map((r) => '/runs/'+r.runId));
+      if (current !== next) location.reload();
+    }, 3000);
+  </script>
+</Layout>

@@ -1,0 +1,11 @@
+---
+import Layout from '../layouts/Layout.astro';
+import {controlJson} from '../lib/control';
+let status;
+let error = '';
+try { status = await controlJson('/status'); } catch (e) { error = e instanceof Error ? e.message : String(e); }
+---
+<Layout title="Wind Tunnel Status">
+  <div class="header"><div><div class="eyebrow">Nazare Wind Tunnel</div><h1>System status</h1></div><a class="button" href="/">← Runs</a></div>
+  {error ? <div class="card error">{error}</div> : <pre class="card timeline">{JSON.stringify(status,null,2)}</pre>}
+</Layout>
