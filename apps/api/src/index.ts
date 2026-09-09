@@ -8,6 +8,7 @@ const TOKEN = process.env.WIND_TUNNEL_TOKEN ?? '';
 const MAX_BODY_BYTES = 256_000;
 const MAX_MODEL_TIMEOUT_MS = 30_000;
 const RUN_STATES: RunLifecycle[] = ['queued','preparing','compiling','running','verifying','cancelling','completed','failed','cancelled'];
+const TERMINAL_STATES = new Set<RunLifecycle>(['completed','failed','cancelled']);
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
@@ -44,20 +45,35 @@ function validateArm(value: unknown): Arm {
 
 function dashboard() {
   return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Wind Tunnel</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nazare Wind Tunnel</title>
 <style>
-body{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;background:#0f1117;color:#e7e9ee;margin:0;padding:24px}main{max-width:1100px;margin:auto}h1{font:600 24px system-ui;margin:0 0 20px}.bar{display:flex;gap:8px;margin-bottom:18px}input,button{background:#181b24;color:#eee;border:1px solid #353949;border-radius:7px;padding:9px 11px}input{flex:1}button{cursor:pointer}.runs{display:grid;gap:8px}.run{border:1px solid #2c3040;border-radius:10px;padding:12px;background:#151821}.top{display:flex;justify-content:space-between;gap:12px}.status{font-weight:700}.running,.preparing,.compiling,.verifying{color:#67a7ff}.completed{color:#71d99d}.failed{color:#ff7070}.cancelled,.cancelling{color:#e5b95d}.meta{color:#9ca3b5;margin-top:6px}.events{white-space:pre-wrap;color:#c8ccd8;background:#0c0e13;border-radius:7px;padding:10px;margin-top:10px;max-height:340px;overflow:auto}.progress{height:5px;background:#2a2e3a;border-radius:4px;margin-top:8px;overflow:hidden}.progress i{display:block;height:100%;background:#67a7ff}.error{color:#ff8c8c;margin-top:8px;white-space:pre-wrap}.small{font-size:12px;color:#8d94a5}</style></head>
-<body><main><h1>Nazare Wind Tunnel</h1><div class="bar"><input id="token" type="password" placeholder="WIND_TUNNEL_TOKEN"><button id="save">Connect</button></div><div id="runs" class="runs"></div></main>
+:root{color-scheme:dark}*{box-sizing:border-box}body{font:14px ui-monospace,SFMono-Regular,Menlo,monospace;background:#0f1117;color:#e7e9ee;margin:0;padding:24px}main{max-width:1180px;margin:auto}h1,h2,h3{font-family:system-ui,sans-serif}h1{font-size:24px;margin:0}h2{font-size:18px;margin:0 0 12px}h3{font-size:14px;margin:18px 0 8px;color:#c7cbd6}.head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.bar{display:flex;gap:8px;align-items:center}.auth{display:flex;gap:8px;align-items:center}.auth input{width:360px}input,button{background:#181b24;color:#eee;border:1px solid #353949;border-radius:7px;padding:9px 11px}button{cursor:pointer}.danger{border-color:#743b43;color:#ff9ca5}.ghost{background:transparent}.connected{color:#71d99d}.disconnected{color:#ff8c8c}.muted,.small{color:#8d94a5}.small{font-size:12px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card,.run{border:1px solid #2c3040;border-radius:10px;padding:14px;background:#151821}.runs{display:grid;gap:8px}.run{cursor:pointer}.run:hover{border-color:#4d556d}.top{display:flex;justify-content:space-between;gap:12px;align-items:center}.status{font-weight:700}.running,.preparing,.compiling,.verifying{color:#67a7ff}.completed{color:#71d99d}.failed{color:#ff7070}.cancelled,.cancelling{color:#e5b95d}.meta{color:#9ca3b5;margin-top:7px;overflow-wrap:anywhere}.events{white-space:pre-wrap;color:#c8ccd8;background:#0c0e13;border-radius:7px;padding:10px;max-height:420px;overflow:auto}.progress{height:7px;background:#2a2e3a;border-radius:4px;margin-top:8px;overflow:hidden}.progress i{display:block;height:100%;background:#67a7ff}.error{color:#ff8c8c;white-space:pre-wrap}.kv{display:grid;grid-template-columns:150px 1fr;gap:7px 14px}.phase{display:flex;justify-content:space-between;border-bottom:1px solid #272b36;padding:7px 0}.artifact{border-bottom:1px solid #272b36;padding:7px 0;overflow-wrap:anywhere}.back{margin-bottom:14px;display:inline-block;color:#a8c7ff;cursor:pointer}.empty{padding:18px;border:1px dashed #343947;border-radius:10px;color:#8d94a5}.pill{display:inline-block;border:1px solid #353949;border-radius:999px;padding:3px 7px}.worker-ok{color:#71d99d}.worker-stale{color:#ff8c8c}@media(max-width:800px){.grid{grid-template-columns:1fr}.head{align-items:flex-start;flex-direction:column}.auth{width:100%}.auth input{width:100%}.kv{grid-template-columns:110px 1fr}}
+</style></head>
+<body><main><div class="head"><div><h1>Nazare Wind Tunnel</h1><div id="conn" class="small">Not connected</div></div><div class="auth"><input id="token" type="password" placeholder="WIND_TUNNEL_TOKEN"><button id="save">Connect</button></div></div><div id="app"></div></main>
 <script>
-const tokenInput=document.getElementById('token'); tokenInput.value=sessionStorage.wtToken||'';
-document.getElementById('save').onclick=()=>{sessionStorage.wtToken=tokenInput.value;load()};
+const app=document.getElementById('app'), conn=document.getElementById('conn'), tokenInput=document.getElementById('token');
+tokenInput.value=sessionStorage.wtToken||'';
+const terminal=new Set(['completed','failed','cancelled']);
+const esc=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
 const auth=()=>({'Authorization':'Bearer '+(sessionStorage.wtToken||tokenInput.value)});
-const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...auth(),...(opts.headers||{})}});if(!r.ok)throw new Error(await r.text());return r.json()}
-async function cancel(id){await api('/runs/'+id+'/cancel',{method:'POST'});load()}
-async function events(id){const x=await api('/runs/'+id+'/events?limit=150');return x.events.map(e=>e.at+'  '+e.type+(e.data?.text?'  '+e.data.text:'')).join('\n')}
-async function load(){try{const data=await api('/runs?limit=25');const rows=await Promise.all(data.runs.map(async r=>{let ev='';if(!['completed','failed','cancelled'].includes(r.status))ev=await events(r.runId).catch(()=> '');const elapsed=r.elapsedMs||0;const agentStart=(ev.match(/agent.started/g)||[]).length;const pct=r.status==='running'?Math.min(100,elapsed/300):0;return '<div class="run"><div class="top"><div><span class="status '+r.status+'">'+esc(r.status)+'</span> <span class="small">'+esc(r.runId)+'</span></div><div>'+Math.round(elapsed/100)/10+'s</div></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha.slice(0,10))+' · '+esc(r.spec.arm)+' · '+esc(r.spec.experiment.path)+'</div>'+(r.status==='running'?'<div class="progress"><i style="width:'+pct+'%"></i></div>':'')+(r.error?'<div class="error">'+esc(r.errorCode||'error')+': '+esc(r.error)+'</div>':'')+(!['completed','failed','cancelled'].includes(r.status)?'<button onclick="cancel(\''+r.runId+'\')">Cancel</button>':'')+(ev?'<div class="events">'+esc(ev)+'</div>':'')+'</div>'}));document.getElementById('runs').innerHTML=rows.join('')}catch(e){document.getElementById('runs').innerHTML='<div class="error">'+esc(e)+'</div>'}}
-load();setInterval(load,2000);
+async function api(path,opts={}){const r=await fetch(path,{...opts,headers:{...auth(),...(opts.headers||{})}});if(!r.ok){const t=await r.text();const e=new Error(t||('HTTP '+r.status));e.status=r.status;throw e}return r.json()}
+function fmtMs(ms){if(ms==null)return '—';if(ms<1000)return Math.round(ms)+' ms';return (ms/1000).toFixed(ms<10000?1:0)+' s'}
+function eventTime(x){return Date.parse(x.at)}
+function workerHealth(r){if(terminal.has(r.status)||!r.workerId)return {label:'—',cls:'muted'};const lease=Date.parse(r.leaseUntil||0);return lease>Date.now()?{label:'healthy',cls:'worker-ok'}:{label:'stale',cls:'worker-stale'}}
+function phaseDurations(r,events){const first=t=>events.find(e=>e.type===t);const time=t=>{const e=first(t);return e?eventTime(e):null};const now=Date.now();const end=terminal.has(r.status)?Date.parse(r.finishedAt||r.updatedAt):now;const prep=time('subject.preparing');const ready=time('subject.ready');const compileStart=time('nazare.compile.started');const compileEnd=time('nazare.compile.completed');const agentStart=time('agent.started');const agentEnd=time('agent.completed')||time('agent.timeout')||time('agent.cancelled');const verifyStart=time('verification.started');const verifyEnd=time('verification.completed');return [{name:'prepare',ms:prep?(ready||end)-prep:null},{name:'compile',ms:compileStart?(compileEnd||end)-compileStart:null},{name:'agent',ms:agentStart?(agentEnd||end)-agentStart:null},{name:'verify',ms:verifyStart?(verifyEnd||end)-verifyStart:null}]}
+function agentBudget(r,events){const e=events.find(x=>x.type==='agent.started');if(!e)return null;const started=eventTime(e);const ended=events.find(x=>['agent.completed','agent.timeout','agent.cancelled'].includes(x.type));const elapsed=(ended?eventTime(ended):Date.now())-started;const budget=r.spec.agent.timeoutMs||30000;return {elapsed,budget,pct:Math.min(100,Math.max(0,elapsed/budget*100)),remaining:Math.max(0,budget-elapsed)}}
+function eventLine(e){let detail='';if(e.data?.text)detail='  '+String(e.data.text).replace(/\s+/g,' ').slice(0,300);else if(e.data && Object.keys(e.data).length)detail='  '+JSON.stringify(e.data).slice(0,300);return new Date(e.at).toLocaleTimeString()+'  '+e.type+detail}
+async function connect(){sessionStorage.wtToken=tokenInput.value.trim();if(!sessionStorage.wtToken){conn.className='disconnected small';conn.textContent='Token required';return}try{const d=await api('/runs?limit=1');conn.className='connected small';conn.textContent='Connected ✓ · '+d.runs.length+(d.runs.length===1?' recent run':' recent runs visible');route()}catch(e){conn.className='disconnected small';conn.textContent=e.status===401?'Unauthorized — token does not match Railway':'Connection failed — '+e.message}}
+document.getElementById('save').onclick=connect;tokenInput.addEventListener('keydown',e=>{if(e.key==='Enter')connect()});
+async function cancelRun(id){if(!confirm('Cancel Wind Tunnel run '+id+'?'))return;await api('/runs/'+id+'/cancel',{method:'POST'});showRun(id)}
+function goRun(id){history.pushState({},'', '/wind-tunnel/runs/'+id);route()}
+function goHome(){history.pushState({},'', '/wind-tunnel');route()}
+window.addEventListener('popstate',route);
+async function showRuns(){const d=await api('/runs?limit=30');if(!d.runs.length){app.innerHTML='<div class="empty">Connected ✓ · No runs yet</div>';return}const rows=d.runs.map(r=>{const wh=workerHealth(r);return '<div class="run" onclick="goRun(\''+r.runId+'\')"><div class="top"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="small">'+esc(r.runId)+'</span></div><div>'+fmtMs(r.elapsedMs)+'</div></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha.slice(0,10))+' · '+esc(r.spec.arm)+' · '+esc(r.spec.experiment.path)+'</div><div class="small" style="margin-top:7px">worker: <span class="'+wh.cls+'">'+wh.label+'</span>'+ (r.errorCode?' · '+esc(r.errorCode):'') +'</div></div>'}).join('');app.innerHTML='<h2>Recent runs</h2><div class="runs">'+rows+'</div>'}
+async function showRun(id){const [r,e,a]=await Promise.all([api('/runs/'+id),api('/runs/'+id+'/events?limit=500'),api('/runs/'+id+'/artifacts')]);const wh=workerHealth(r), phases=phaseDurations(r,e.events), budget=agentBudget(r,e.events);const phaseHtml=phases.map(p=>'<div class="phase"><span>'+p.name+'</span><b>'+fmtMs(p.ms)+'</b></div>').join('');const eventsHtml=e.events.length?e.events.map(eventLine).join('\n'):'No events yet';const arts=a.artifacts.length?a.artifacts.map(x=>'<div class="artifact"><b>'+esc(x.type)+'</b><div class="small">'+esc(x.key)+' · '+esc(x.mediaType)+' · '+x.bytes+' bytes</div></div>').join(''):'<div class="muted">No artifacts yet</div>';app.innerHTML='<span class="back" onclick="goHome()">← recent runs</span><div class="card"><div class="top"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span> <span class="small">'+esc(r.runId)+'</span></div><div>'+fmtMs(r.elapsedMs)+'</div></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.arm)+' · '+esc(r.spec.experiment.path)+'</div>'+(budget?'<h3>Model budget</h3><div class="top"><span>'+fmtMs(budget.elapsed)+' / '+fmtMs(budget.budget)+'</span><span>'+fmtMs(budget.remaining)+' remaining</span></div><div class="progress"><i style="width:'+budget.pct+'%"></i></div>':'')+(r.error?'<h3>Error</h3><div class="error"><b>'+esc(r.errorCode||'error')+'</b>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:14px"><button class="danger" onclick="cancelRun(\''+r.runId+'\')">Cancel run</button></div>':'')+'</div><div class="grid" style="margin-top:12px"><div class="card"><h2>Run</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+wh.cls+'">'+wh.label+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span><span class="muted">model timeout</span><span>'+fmtMs(r.spec.agent.timeoutMs)+'</span></div><h3>Phase timings</h3>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+arts+'</div></div><div class="card" style="margin-top:12px"><h2>Timeline</h2><div class="events">'+esc(eventsHtml)+'</div></div>';if(!terminal.has(r.status)){clearTimeout(window.__wtTimer);window.__wtTimer=setTimeout(()=>showRun(id).catch(renderError),1000)}}
+function renderError(e){if(e.status===401){conn.className='disconnected small';conn.textContent='Unauthorized — token does not match Railway'}app.innerHTML='<div class="error">'+esc(e.message)+'</div>'}
+async function route(){clearTimeout(window.__wtTimer);if(!sessionStorage.wtToken){app.innerHTML='<div class="empty">Enter WIND_TUNNEL_TOKEN and click Connect.</div>';return}try{const m=location.pathname.match(/^\/wind-tunnel\/runs\/([0-9a-f-]+)$/i);if(m)await showRun(m[1]);else{await showRuns();window.__wtTimer=setTimeout(()=>showRuns().catch(renderError),2000)}}catch(e){renderError(e)}}
+if(sessionStorage.wtToken)connect();else route();
 </script></body></html>`;
 }
 
@@ -67,10 +83,10 @@ createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     if (url.pathname === '/health') {
-      json(res, 200, {ok:true, service:'nazare-wind-tunnel-api', version:3, maxModelTimeoutMs:MAX_MODEL_TIMEOUT_MS});
+      json(res, 200, {ok:true, service:'nazare-wind-tunnel-api', version:4, maxModelTimeoutMs:MAX_MODEL_TIMEOUT_MS});
       return;
     }
-    if (url.pathname === '/' || url.pathname === '/wind-tunnel') {
+    if (url.pathname === '/' || url.pathname === '/wind-tunnel' || /^\/wind-tunnel\/runs\/[0-9a-f-]+$/i.test(url.pathname)) {
       html(res, dashboard());
       return;
     }
@@ -116,6 +132,15 @@ createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'GET' && url.pathname === '/status') {
+      const runs = await listRuns({limit:100});
+      const counts = Object.fromEntries(RUN_STATES.map(status => [status, runs.filter(run => run.status === status).length]));
+      const active = runs.filter(run => !TERMINAL_STATES.has(run.status));
+      const workers = active.filter(run => run.workerId).map(run => ({runId:run.runId,workerId:run.workerId,status:run.status,leaseUntil:run.leaseUntil,healthy:Boolean(run.leaseUntil && Date.parse(run.leaseUntil) > Date.now())}));
+      json(res, 200, {counts,activeRuns:active.length,workers});
+      return;
+    }
+
     const cancelMatch = url.pathname.match(/^\/runs\/([0-9a-f-]+)\/cancel$/i);
     if (req.method === 'POST' && cancelMatch) {
       const run = await requestCancel(cancelMatch[1]);
@@ -146,7 +171,7 @@ createServer(async (req, res) => {
           res.write(`id: ${event.seq}\nevent: run\ndata: ${JSON.stringify(event)}\n\n`);
         }
         const run = await getRun(runId);
-        if (['completed','failed','cancelled'].includes(run.status)) {
+        if (TERMINAL_STATES.has(run.status)) {
           res.write(`event: terminal\ndata: ${JSON.stringify(run)}\n\n`);
           res.end();
           return;
