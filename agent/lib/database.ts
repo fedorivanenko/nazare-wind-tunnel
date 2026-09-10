@@ -173,10 +173,9 @@ export async function persistEvent(input: {
 	if (input.type === "session.waiting") {
 		await database`
 			update wind_tunnel_runs
-			set status=case when result is null then 'failed' else status end,
-				error=case when result is null then ${database.json({ code: "missing_finish_run", message: "Session parked without finish_run evidence" })} else error end,
-				updated_at=now(), finished_at=coalesce(finished_at, now())
-			where session_id=${input.sessionId}
+			set status=case when result is null then 'verifying' else status end,
+				updated_at=now()
+			where session_id=${input.sessionId} and status not in ('completed','failed','cancelled')
 		`;
 		return;
 	}
