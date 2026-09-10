@@ -17,6 +17,24 @@ import {
 	shellQuote,
 } from "./subject";
 
+function mutationPathsFromBootstrap(
+	bootstrap: Array<{ id: string; output: unknown }>,
+) {
+	const paths = new Set<string>();
+	for (const entry of bootstrap) {
+		if (!entry.output || typeof entry.output !== "object") continue;
+		const mutationSet = (entry.output as { mutationSet?: unknown }).mutationSet;
+		if (!mutationSet || typeof mutationSet !== "object") continue;
+		const files = (mutationSet as { files?: unknown }).files;
+		if (!Array.isArray(files)) continue;
+		for (const file of files) {
+			if (typeof file !== "string" || !file.trim()) continue;
+			paths.add(file.trim().replace(/^\.\//, ""));
+		}
+	}
+	return [...paths].sort();
+}
+
 export async function prepareSubject(
 	experimentPath: string,
 	ctx: Pick<ToolContext, "getSandbox">,
@@ -110,6 +128,7 @@ export async function prepareSubject(
 			bootstrap.push({ id: entry.id, output });
 		}
 	}
+	const mutationPaths = mutationPathsFromBootstrap(bootstrap);
 	const preparedAt = new Date().toISOString();
 	const prepared = {
 		experimentPath,
@@ -121,6 +140,7 @@ export async function prepareSubject(
 			: null,
 		preparedDependencyKey,
 		compiledSubject,
+		mutationPaths,
 		modelTimeoutMs: experiment.agent?.timeoutMs ?? 30_000,
 		preparationStartedAt,
 		preparationDurationMs: Date.now() - preparationStartedMs,
