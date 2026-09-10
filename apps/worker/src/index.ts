@@ -37,7 +37,7 @@ function buildPrompt(task:string,bootstrapContext:Array<{id:string;result:unknow
     'Do not weaken tests, lint rules, policies, evidence contracts, or architectural constraints.',
     'Leave the working checkout with the implementation applied and finish immediately when the patch is complete.',
     '',
-    'PINNED BOOTSTRAP CONTEXT:',context,'','TASK:',task.trim(),
+    'PINNED BOOTSTRAP CONTEXT:',context,'','TASK:',task.trim(),'','FINAL EXECUTION PRIORITY:','Do not run the full lint, test, typecheck, or build gate. Evaluator runs it after you return. Once implementation is applied, return immediately.',
   ].join('\n');
 }
 const sha256=(value:string|Buffer)=>createHash('sha256').update(value).digest('hex');
