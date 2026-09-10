@@ -66,7 +66,9 @@ export async function compileSubject(
 	const sandbox = await ctx.getSandbox();
 	const outputPath = contract.compile.output;
 	if (!outputPath.startsWith("/workspace/"))
-		throw new Error("Compiled subject output must live under /workspace outside the candidate repository");
+		throw new Error(
+			"Compiled subject output must live under /workspace outside the candidate repository",
+		);
 	const command = [
 		`cd ${REPOSITORY_ROOT}`,
 		`WIND_TUNNEL_SUBJECT_OUTPUT=${shellQuote(outputPath)} pnpm exec tsx ${shellQuote(
@@ -75,7 +77,9 @@ export async function compileSubject(
 	].join(" && ");
 	const result = await sandbox.run({ command });
 	if (result.exitCode !== 0)
-		throw new Error(`Subject compiler failed: ${result.stderr || result.stdout}`);
+		throw new Error(
+			`Subject compiler failed: ${result.stderr || result.stdout}`,
+		);
 	const compiled = requiredText(
 		await sandbox.readTextFile({ path: outputPath }),
 		"Compiled subject",
