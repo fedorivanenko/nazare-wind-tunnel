@@ -18,6 +18,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm add --global @biomejs/biome@2.4.14
       - run: pnpm typecheck
       - run: pnpm check
       - run: pnpm dashboard:build
