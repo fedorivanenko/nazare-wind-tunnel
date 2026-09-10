@@ -1,78 +1,94 @@
 # Nazare Wind Tunnel
 
-Nazare Wind Tunnel is a persistent testing environment that pins a subject repository and agent configuration, gives the model an explicit toolset, and measures task effectiveness.
+Nazare Wind Tunnel runs exact private source snapshots through an eve coding agent in hardware-isolated Vercel Sandboxes.
 
-The Wind Tunnel repository contains the testing machinery. Subject repositories remain separate and are materialized lazily into a persistent Railway volume by repository + exact commit SHA.
-
-## Architecture
+## Production architecture
 
 ```text
-GitHub PR in subject repo
+GitHub pull request
         |
-        | manual workflow
+        | manual workflow_dispatch
         v
-Wind Tunnel API (Railway)
-        |
-        v
-Postgres queue
-        |
-        v
-Wind Tunnel worker (Railway)
+GitHub Action
+  - resolves exact PR SHA
+  - validates experiment
+  - creates credential-free git archive
         |
         v
-persistent /workspace subject cache
+Vercel eve HTTP channel
         |
-        +-- repos/<owner>/<repo>/.git
-        +-- repos/<owner>/<repo>/node_modules
-        +-- pnpm-store
-        +-- .wind-tunnel/subjects
+        +-- Vercel Workflow: durable session and event stream
+        +-- Vercel AI Gateway: pinned model
+        +-- Vercel Sandbox: isolated source mutation and verification
 ```
 
-## pnpm monorepo
+Vercel is primary runtime. Railway API, worker, dashboard, PostgreSQL telemetry, and S3 adapters remain temporarily as rollback infrastructure; new GitHub runs do not depend on them.
+
+## Security boundary
+
+GitHub Action checks out exact candidate SHA and uploads `source.tar.gz` as eve attachment. Sandbox receives candidate archive only. It receives no GitHub, Vercel, control-plane, database, or object-storage credentials.
+
+Inside sandbox:
+
+1. `prepare_subject` extracts archive into `/workspace/repo`.
+2. It initializes credential-free local Git baseline.
+3. It installs dependencies with pinned pnpm `10.17.1`.
+4. Network changes to `deny-all` before subject bootstrap/model shell execution.
+5. Agent mutates candidate.
+6. `finish_run` executes trusted experiment verification and captures staged binary Git patch.
+
+No clone, fetch, push, or golden reference occurs in agent sandbox.
+
+## eve agent
+
+Pinned runtime:
 
 ```text
-apps/
-  api/                    public queue/status API
-  worker/                 private long-running experiment worker
-
-packages/
-  domain/                 run contracts and lifecycle
-  storage/                Postgres queue + S3 artifacts
-  subject-manager/        persistent repo cache + dependency reuse
-  pi/                     fixed Pi harness adapter
+eve 0.52.5
+model openai/gpt-oss-120b
+reasoning low
+Vercel Sandbox: 2 vCPU
+pnpm 10.17.1
 ```
 
-`nazare-hydrogen` is not part of this monorepo. It is an external experiment subject.
+Model-facing tools:
 
-## Run request
-
-```http
-POST /runs
-Authorization: Bearer $WIND_TUNNEL_TOKEN
-Content-Type: application/json
-
-{
-  "repository": "fedorivanenko/nazare-hydrogen",
-  "sourceSha": "<exact 40-char PR HEAD SHA>",
-  "experiment": ".wind-tunnel/hydrogen-operability/experiment.json"
-}
+```text
+prepare_subject
+bash
+read_file
+write_file
+grep
+finish_run
 ```
 
-The API stores the immutable request in Postgres and returns immediately. Experiment configuration pins provider, model, thinking level, timeout, verification, enabled tool names, and repo-relative Pi extensions:
+Agent definition lives under `agent/`:
+
+```text
+agent/
+  agent.ts
+  instructions.md
+  sandbox.ts
+  channels/eve.ts
+  lib/subject.ts
+  tools/
+```
+
+## Experiment contract
+
+Subject repository owns experiment and task files. Existing experiment JSON remains valid for source preparation, deterministic bootstrap, and verification:
 
 ```json
 {
   "id": "marketing-consent-02",
-  "taskFile": "experiments/task.md",
+  "taskFile": "experiments/luna-operability/task-02-marketing-consent.md",
   "agent": {
     "provider": "vercel-ai-gateway",
-    "model": "openai/gpt-oss-20b",
+    "model": "openai/gpt-oss-120b",
     "thinking": "low",
     "timeoutMs": 30000
   },
   "tools": {
-    "allow": ["read", "bash", "edit", "write", "project_search"],
-    "extensions": [".wind-tunnel/project-tools.ts"],
     "bootstrap": [{
       "id": "task-context",
       "entrypoint": ".wind-tunnel/prepare-change.ts",
@@ -81,124 +97,81 @@ The API stores the immutable request in Postgres and returns immediately. Experi
       "required": true
     }]
   },
-  "verification": ["pnpm test"]
+  "verification": [
+    {"name":"task-oracle","command":"pnpm exec tsx .wind-tunnel/verify-marketing-consent.ts","required":true}
+  ]
 }
 ```
 
-Pi starts with ambient extensions, skills, prompt templates, and context files disabled. Only declared tools and extensions load. If `tools` is omitted, fixed defaults are `read`, `bash`, `edit`, and `write` with no bootstrap providers.
+Model selection now belongs to `agent/agent.ts`; experiment `agent` fields remain compatibility metadata during migration.
 
-Before model launch, worker loads declared extensions and records effective custom-tool descriptions and JSON schemas. Missing, duplicate, or unloadable allowlisted tools fail preflight. Bootstrap entrypoints execute through `pnpm exec tsx` with task JSON on stdin. Their bounded JSON output becomes pinned prompt context and an artifact. Bootstrap work is measured separately from model-initiated tool calls.
+## Deployment
 
-## Persistent subject cache
-
-On the first run for a repository, the worker clones it into:
+Vercel project:
 
 ```text
-/workspace/repos/<owner>/<repo>
+fedor-hyumans-projects/nazare-wind-tunnel
+https://nazare-wind-tunnel.vercel.app
 ```
 
-Later runs reuse the same trusted Git/dependency cache. Worker fetches only requested commit, resets trusted cache, then exports a `.git`-free per-run workspace:
+Commands:
 
-```text
-git fetch --no-tags --force origin <sourceSha>
-git reset --hard <sourceSha>
-git clean -fdx -e node_modules/
-git archive <sourceSha> → /workspace/runs/<runId>/subject
-```
-
-Pi, bootstrap, and verification run in isolated export. Candidate patch capture uses trusted Git directory with temporary index after Pi exits.
-
-The worker requires `pnpm-lock.yaml`. It hashes the lockfile and only runs:
-
-```text
-pnpm install --frozen-lockfile --store-dir /workspace/pnpm-store
-```
-
-when dependencies are missing or the lockfile hash changed.
-
-## Railway deployment
-
-Use the same GitHub repository for two Railway services.
-
-### API
-
-```text
-Dockerfile: Dockerfile.control
-start: pnpm api
-public: yes
-health: /health
-```
-
-### Worker
-
-```text
-Dockerfile: Dockerfile.worker
-start: pnpm worker
-public: no
-persistent volume: /workspace
-concurrency: 1 per worker
-```
-
-Shared infrastructure:
-
-- Postgres for queue, lifecycle and searchable metrics
-- S3-compatible artifact bucket for transcripts, patches and verifier output
-
-Hydrogen changes never redeploy Wind Tunnel. Only changes to this repository trigger Railway rebuilds.
-
-## Required variables
-
-Both API and worker:
-
-```text
-DATABASE_URL
-WIND_TUNNEL_TOKEN
-WIND_TUNNEL_S3_BUCKET
-WIND_TUNNEL_S3_ENDPOINT
-WIND_TUNNEL_S3_REGION
-WIND_TUNNEL_S3_ACCESS_KEY
-WIND_TUNNEL_S3_SECRET_KEY
-```
-
-Worker additionally uses:
-
-```text
-WIND_TUNNEL_WORKSPACE=/workspace
-WIND_TUNNEL_PNPM_STORE=/workspace/pnpm-store
-WIND_TUNNEL_ALLOWED_MODELS_JSON=["vercel-ai-gateway:openai/gpt-oss-20b","vercel-ai-gateway:openai/gpt-oss-120b"]
-```
-
-Private subjects additionally require worker-only fine-grained GitHub token with read-only repository contents access:
-
-```text
-WIND_TUNNEL_GITHUB_SSH_KEY_B64
-# or: WIND_TUNNEL_GITHUB_TOKEN
-```
-
-Prefer repository-scoped read-only deploy key. Git authentication travels through process environment configuration, never URL/arguments/logs. Pi and subject-code subprocesses receive sanitized environments without database, object-storage, control-plane, or GitHub credentials.
-
-Model/provider credentials required by Pi also belong on the worker service. Vercel AI Gateway uses `AI_GATEWAY_API_KEY`.
-
-Optional observability configuration:
-
-```text
-WIND_TUNNEL_PROVIDER_PROBE_TIMEOUT_MS=5000
-WIND_TUNNEL_AGENT_STARTUP_TIMEOUT_MS=15000
-WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS=60000
-```
-
-Before Pi starts, worker performs an authenticated provider/model probe, inspects declared tool schemas, hashes extensions/bootstrap providers, and executes required deterministic context providers. Pi runs with `--offline` to skip startup catalog/version network operations; model inference remains online. PostgreSQL stores lifecycle, batched conversation, tool, workspace, and verification events. Full Pi JSONL remains in S3. Every outcome—including timeout and cancellation—captures `patch.diff` and `changed-files.txt` before cleanup. `environment.json` and `tool-manifest.json` record pinned execution evidence. Timeout diagnostics include Pi stdout/stderr, `agent-diagnostics.json`, and a redacted Node diagnostic report when Pi can produce one.
-
-## CI
-
-Wind Tunnel CI is automatic, cheap and deterministic:
-
-```text
+```bash
 pnpm install
-pnpm typecheck
-pnpm test
-build API image
-build worker image
+pnpm exec eve info
+pnpm build
+pnpm deploy
 ```
 
-Subject experiments remain manual and model-backed.
+`eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template.
+
+## Required configuration
+
+Vercel production environment:
+
+```text
+WIND_TUNNEL_TOKEN
+AI_GATEWAY_API_KEY
+```
+
+`AI_GATEWAY_API_KEY` is currently explicit because project OIDC Gateway billing was not enabled. It can be removed after project AI Gateway billing/OIDC is configured and smoke-tested.
+
+Hydrogen GitHub repository:
+
+```text
+Actions variable:
+EVE_WIND_TUNNEL_URL=https://nazare-wind-tunnel.vercel.app
+
+Actions secret:
+WIND_TUNNEL_TOKEN
+```
+
+No GitHub deploy key/token is needed by eve. GitHub Action already has read access to private source and uploads credential-free archive.
+
+## Trigger
+
+From GitHub Actions, run **Run eve Wind Tunnel** with:
+
+```text
+pr=<same-repository PR number>
+experiment=experiments/luna-operability/experiment-02-marketing-consent.json
+```
+
+Workflow uploads redacted eve NDJSON events plus compact result JSON as private GitHub Actions artifacts.
+
+For local invocation against deployed agent:
+
+```bash
+git -C /path/to/subject archive --format=tar.gz --output=/tmp/source.tar.gz HEAD
+EVE_WIND_TUNNEL_URL=https://nazare-wind-tunnel.vercel.app \
+WIND_TUNNEL_TOKEN=... \
+SUBJECT_REPO=owner/repository \
+SUBJECT_SHA=$(git -C /path/to/subject rev-parse HEAD) \
+EXPERIMENT=experiments/path/experiment.json \
+SUBJECT_ARCHIVE=/tmp/source.tar.gz \
+node scripts/run-eve-wind-tunnel.mjs
+```
+
+## Legacy rollback
+
+Legacy Railway code remains under `apps/` and `packages/`. Do not remove Railway services until eve marketing-change production run passes and operational evidence is accepted. Legacy Dockerfiles remain buildable during this cutover.

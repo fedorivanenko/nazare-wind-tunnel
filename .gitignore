@@ -5,3 +5,8 @@ coverage/
 dist/
 .tmp/
 .DS_Store
+.vercel/
+.eve/
+.output/
+.firecrawl/
+.env*
