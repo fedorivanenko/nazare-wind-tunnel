@@ -1,18 +1,19 @@
 {
-  "name": "@nazare/wind-tunnel-dashboard",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "astro build",
-    "start": "node ./dist/server/entry.mjs"
-  },
-  "dependencies": {
-    "@astrojs/node": "latest",
-    "@nazare/wind-tunnel-domain": "workspace:*",
-    "astro": "latest"
-  },
-  "devDependencies": {
-    "@types/node": "24.13.3",
-    "typescript": "5.9.3"
-  }
+	"name": "@nazare/wind-tunnel-dashboard",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"build": "astro build",
+		"dev": "astro dev"
+	},
+	"dependencies": {
+		"@astrojs/vercel": "11.0.10",
+		"astro": "latest"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "^4.3.3",
+		"@types/node": "24.13.3",
+		"tailwindcss": "^4.3.3",
+		"typescript": "5.9.3"
+	}
 }

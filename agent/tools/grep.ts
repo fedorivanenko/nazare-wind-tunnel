@@ -1,1 +1,1 @@
-export {default} from 'eve/tools/grep';
+export { default } from "eve/tools/grep";

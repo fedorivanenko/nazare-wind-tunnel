@@ -22,7 +22,7 @@ Vercel eve HTTP channel
         +-- Vercel Sandbox: isolated source mutation and verification
 ```
 
-Vercel is primary runtime. Railway API, worker, dashboard, PostgreSQL telemetry, and S3 adapters remain temporarily as rollback infrastructure; new GitHub runs do not depend on them.
+Vercel is the only runtime. The former Railway API, worker, PostgreSQL queue, storage adapters, and Docker deployment path have been removed.
 
 ## Security boundary
 
@@ -125,12 +125,31 @@ pnpm deploy
 
 `eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; pushes to `main` deploy automatically.
 
+## Dashboard
+
+The preserved Astro dashboard now reads durable eve session streams through a server-side authenticated proxy. It shows execution status, model/tool activity, verification evidence, changed files, and raw redacted events. Viewed session IDs remain local to the browser because eve does not expose a session-list endpoint.
+
+```text
+fedor-studio/nazare-wind-tunnel-dashboard
+https://nazare-wind-tunnel-dashboard.vercel.app
+```
+
+The dashboard is a separate Vercel project connected to the same repository with root directory `apps/dashboard`. It deploys automatically on pushes to `main`. Access is protected by `DASHBOARD_ACCESS_TOKEN`; `WIND_TUNNEL_TOKEN` never reaches the browser.
+
 ## Required configuration
 
-Vercel production environment:
+eve project production environment:
 
 ```text
 WIND_TUNNEL_TOKEN
+```
+
+Dashboard project production environment:
+
+```text
+EVE_WIND_TUNNEL_URL
+WIND_TUNNEL_TOKEN
+DASHBOARD_ACCESS_TOKEN
 ```
 
 Vercel project OIDC authenticates eve to AI Gateway automatically; no model-provider secret is configured.
@@ -171,6 +190,11 @@ SUBJECT_ARCHIVE=/tmp/source.tar.gz \
 node scripts/run-eve-wind-tunnel.mjs
 ```
 
-## Legacy rollback
+## Repository layout
 
-Legacy Railway code remains under `apps/` and `packages/`. Do not remove Railway services until eve marketing-change production run passes and operational evidence is accepted. Legacy Dockerfiles remain buildable during this cutover.
+```text
+agent/                  eve agent, channel, sandbox, and tools
+apps/dashboard/         authenticated Astro dashboard
+scripts/                GitHub/local eve client
+.github/workflows/      validation
+```

@@ -1,9 +1,0 @@
-{
-  "name": "@nazare/wind-tunnel-pi",
-  "private": true,
-  "type": "module",
-  "exports": "./src/index.ts",
-  "scripts": {"typecheck": "tsc -p tsconfig.json --noEmit", "test": "tsx --test src/*.test.ts"},
-  "dependencies": {"@earendil-works/pi-coding-agent": "0.85.1"},
-  "devDependencies": {"@types/node": "24.13.3", "tsx": "4.23.13", "typescript": "5.9.3"}
-}

@@ -9,4 +9,4 @@ dist/
 .eve/
 .output/
 .firecrawl/
-.env*
+.astro/

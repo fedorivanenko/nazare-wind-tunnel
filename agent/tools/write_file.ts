@@ -1,1 +1,1 @@
-export {default} from 'eve/tools/write_file';
+export { default } from "eve/tools/write_file";

@@ -1,26 +1,19 @@
 ---
-import Layout from '../layouts/Layout.astro';
+import Layout from "../layouts/Layout.astro";
 ---
 <Layout title="Wind Tunnel Login">
-  <section class="login card">
-    <div class="eyebrow">Nazare</div>
-    <h1>Wind Tunnel</h1>
-    <p class="muted">Enter the dashboard access token. The control API token remains server-side.</p>
-    <form id="login">
-      <input name="token" type="password" autocomplete="current-password" autofocus />
-      <button class="button" type="submit">Connect</button>
-      <div id="error" class="error" style="margin-top:10px"></div>
+  <section class="mx-auto mt-[16vh] max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5">
+    <div class="font-mono text-xs uppercase tracking-wider text-slate-500">Nazare · eve</div>
+    <h1 class="mt-1 text-2xl font-bold">Wind Tunnel</h1>
+    <p class="mt-3 text-sm text-slate-400">Enter the dashboard access token. The eve service token remains server-side.</p>
+    <form id="login" class="mt-4 grid gap-3">
+      <input class="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 outline-none focus:border-blue-500" name="token" type="password" autocomplete="current-password" autofocus />
+      <button class="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 hover:border-slate-500" type="submit">Connect</button>
+      <div id="error" class="font-mono text-xs text-red-400"></div>
     </form>
   </section>
   <script>
-    const form = document.querySelector('#login');
-    const error = document.querySelector('#error');
-    form?.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      if (!(form instanceof HTMLFormElement)) return;
-      const response = await fetch('/api/session', {method:'POST', body:new FormData(form)});
-      if (response.ok) location.href = '/';
-      else if (error) error.textContent = 'Unauthorized';
-    });
+    const form=document.querySelector('#login');const error=document.querySelector('#error');
+    form?.addEventListener('submit',async event=>{event.preventDefault();if(!(form instanceof HTMLFormElement))return;const response=await fetch('/api/session',{method:'POST',body:new FormData(form)});if(response.ok)location.href='/';else if(error)error.textContent='Unauthorized';});
   </script>
 </Layout>

@@ -1,1 +1,1 @@
-export {default} from 'eve/tools/bash';
+export { default } from "eve/tools/bash";

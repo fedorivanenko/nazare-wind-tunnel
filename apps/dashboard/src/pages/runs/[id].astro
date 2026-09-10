@@ -1,182 +1,50 @@
 ---
-import Layout from '../../layouts/Layout.astro';
-import {controlJson, type EventsResponse, type ArtifactsResponse} from '../../lib/control';
-import type {RunState} from '@nazare/wind-tunnel-domain';
+import Layout from "../../layouts/Layout.astro";
 
-const id = Astro.params.id ?? '';
-let run: RunState | null = null;
-let events: EventsResponse['events'] = [];
-let artifacts: ArtifactsResponse['artifacts'] = [];
-let loadError = '';
-try {
-  [run, events, artifacts] = await Promise.all([
-    controlJson<RunState>(`/runs/${id}`),
-    controlJson<EventsResponse>(`/runs/${id}/events?limit=1000`).then(x => x.events),
-    controlJson<ArtifactsResponse>(`/runs/${id}/artifacts`).then(x => x.artifacts),
-  ]);
-} catch (error) { loadError = error instanceof Error ? error.message : String(error); }
-const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
+const id = Astro.params.id ?? "";
 ---
-<Layout title={`Wind Tunnel ${id.slice(0,8)}`}>
-  <div class="header"><div><div class="eyebrow">Nazare Wind Tunnel</div><h1>Run <span class="meta">{id}</span></h1></div><a class="button" href="/">← Runs</a></div>
-  {loadError ? <div class="card error">{loadError}</div> : <div id="app"></div>}
-  <script type="application/json" id="initial" set:html={initial}></script>
-  <script>
-    const id = location.pathname.split('/').filter(Boolean).at(-1);
-    const terminal = new Set(['completed','failed','cancelled']);
-    const initialEl = document.querySelector('#initial');
-    let state = initialEl?.textContent ? JSON.parse(initialEl.textContent) : {run:null,events:[],artifacts:[]};
-    const esc = (s) => String(s ?? '').replace(/[&<>\"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]));
-    const fmt = (ms) => ms == null ? '—' : ms < 1000 ? Math.round(ms)+' ms' : (ms/1000).toFixed(ms < 10000 ? 1 : 0)+' s';
-    const eventTime = (e) => Date.parse(e.at);
-    const find = (type) => state.events.find((e) => e.type === type);
-    const phase = (startType,endTypes) => {const start=find(startType); if(!start)return null; const end=state.events.find((e)=>endTypes.includes(e.type)); const stop=end?eventTime(end):(terminal.has(state.run.status)?Date.parse(state.run.finishedAt||state.run.updatedAt):Date.now()); return Math.max(0,stop-eventTime(start));};
-    const workerHealth = () => terminal.has(state.run.status)||!state.run.workerId?'—':Date.parse(state.run.leaseUntil||0)>Date.now()?'healthy':'stale';
-    const agentMetric = () => {
-      const start=find('agent.started');
-      const toolEvents=state.events.filter(e=>e.type==='agent.tool.started');
-      const firstTool=toolEvents[0];
-      const firstEdit=toolEvents.find(e=>['edit','write','apply_patch'].includes(String(e.data?.name||'')));
-      const bootstrap=find('bootstrap.completed');
-      const bootstrapFailed=find('bootstrap.failed');
-      const malformed=Boolean(find('agent.tool.malformed'))||state.events.some(e=>e.type==='agent.message.delta'&&/to=functions\.|to=functions\//.test(String(e.data?.text||'')));
-      return {toolCalls:toolEvents.length,firstToolMs:start&&firstTool?eventTime(firstTool)-eventTime(start):null,firstEditMs:start&&firstEdit?eventTime(firstEdit)-eventTime(start):null,bootstrap,bootstrapFailed,malformed};
-    };
-    const eventLine = (e) => {let detail='';if(e.data?.text)detail='  '+String(e.data.text).replace(/\s+/g,' ').slice(0,500);else if(e.data&&Object.keys(e.data).length)detail='  '+JSON.stringify(e.data).slice(0,500);return new Date(e.at).toLocaleTimeString()+'  '+e.type+detail;};
-
-    const semanticTypes = new Set([
-      'agent.message.started','agent.message.delta','agent.message.completed',
-      'agent.thinking.started','agent.thinking.delta','agent.thinking.completed',
-      'agent.tool.started','agent.tool.update','agent.tool.completed'
-    ]);
-
-    function conversationItems(events){
+<Layout title={`eve session ${id.slice(0,12)}`}>
+  <div class="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-start">
+    <div><div class="font-mono text-xs uppercase tracking-wider text-slate-500">Nazare Wind Tunnel · eve</div><h1 class="mt-1 text-2xl font-bold">Session <span class="font-mono text-base text-slate-400">{id}</span></h1></div>
+    <a class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 hover:border-slate-500" href="/">← Sessions</a>
+  </div>
+  <div id="app" class="grid gap-3"><div class="rounded-xl border border-slate-800 bg-slate-900 p-4 text-slate-400">Loading durable event stream…</div></div>
+  <script define:vars={{id}}>
+    const escapeHtml=(value)=>String(value??'').replace(/[&<>\"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[char]));
+    const eventsByType=(events,type)=>events.filter(event=>event.type===type);
+    const eventAt=(event)=>Date.parse(event?.meta?.at??0);
+    const formatDuration=(milliseconds)=>milliseconds<1000?`${Math.round(milliseconds)} ms`:`${(milliseconds/1000).toFixed(milliseconds<10000?1:0)} s`;
+    const compact=(value,limit=5000)=>{const text=typeof value==='string'?value:JSON.stringify(value,null,2);return text.length>limit?text.slice(0,limit)+'\n[truncated]':text;};
+    const remember=()=>{const key='nazare-eve-sessions';let sessions=[];try{sessions=JSON.parse(localStorage.getItem(key)||'[]')}catch{};sessions=[{id,at:new Date().toISOString()},...sessions.filter(item=>item.id!==id)].slice(0,30);localStorage.setItem(key,JSON.stringify(sessions));};
+    function derive(events){
+      const started=events.find(event=>event.type==='session.started');const latest=events.at(-1);const failed=events.find(event=>event.type==='turn.failed'||event.type==='session.failed');const waiting=events.find(event=>event.type==='session.waiting');
+      const finish=eventsByType(events,'action.result').map(event=>event.data?.result).find(result=>result?.toolName==='finish_run'&&!result?.isError)?.output;
+      const status=failed?'failed':waiting?'completed':latest?.type==='session.completed'?'completed':'running';
+      return {started,latest,failed,finish,status,elapsed:started&&latest?Math.max(0,eventAt(latest)-eventAt(started)):0,model:events.find(event=>event.type==='step.started')?.data?.modelId??'—',tools:eventsByType(events,'action.result')};
+    }
+    function conversation(events){
       const items=[];
-      const semantic = events.some(e => semanticTypes.has(e.type));
-      let assistant=null;
-      let thinking=null;
-      const push=(item)=>{if(item?.text)items.push(item);};
-      const append=(current,role,text,at,kind='message')=>{
-        if(!text)return current;
-        if(!current){current={kind,role,text:'',at,partial:true};items.push(current);}
-        current.text+=text;
-        return current;
-      };
-
       for(const event of events){
-        if(event.type==='agent.stderr'){push({kind:'stderr',role:'stderr',text:String(event.data?.text||''),at:event.at});continue;}
-        if(semantic){
-          if(event.type==='agent.message.started'){
-            if(event.data?.role==='assistant') assistant=null;
-            continue;
-          }
-          if(event.type==='agent.message.delta'){
-            assistant=append(assistant,'assistant',String(event.data?.text||''),event.at);
-            continue;
-          }
-          if(event.type==='agent.message.completed'){
-            const role=String(event.data?.role||'assistant');
-            const text=String(event.data?.text||'');
-            if(role==='user') push({kind:'message',role:'user',text,at:event.at});
-            else if(role==='assistant') {
-              if(assistant){assistant.partial=false;assistant=null;}
-              else push({kind:'message',role:'assistant',text,at:event.at});
-            }
-            continue;
-          }
-          if(event.type==='agent.thinking.started'){thinking=null;continue;}
-          if(event.type==='agent.thinking.delta'){
-            thinking=append(thinking,'thinking',String(event.data?.text||''),event.at,'thinking');
-            continue;
-          }
-          if(event.type==='agent.thinking.completed'){
-            if(thinking){thinking.partial=false;thinking=null;}
-            else if(event.data?.text) push({kind:'thinking',role:'thinking',text:String(event.data.text),at:event.at});
-            continue;
-          }
-          if(event.type==='agent.tool.started'){
-            const args=event.data?.args==null?'':typeof event.data.args==='string'?event.data.args:JSON.stringify(event.data.args,null,2);
-            push({kind:'tool',role:'tool',text:String(event.data?.name||'tool')+(args?'\n'+args:''),at:event.at,partial:true});
-            continue;
-          }
-          if(event.type==='agent.tool.update'){
-            push({kind:'tool',role:'tool',text:String(event.data?.name||'tool')+' · update\n'+String(event.data?.text||''),at:event.at,partial:true});
-            continue;
-          }
-          if(event.type==='agent.tool.completed'){
-            const result=String(event.data?.result||'');
-            const error=event.data?.isError?'Tool failed':'';
-            push({kind:'tool',role:'tool',text:String(event.data?.name||'tool')+(result?'\n'+result.slice(0,4000):'')+(error?'\nERROR: '+error:''),at:event.at});
-            continue;
-          }
-          continue;
+        if(event.type==='message.received')items.push({role:'user',at:event.meta?.at,text:event.data?.message});
+        if(event.type==='reasoning.completed')items.push({role:'reasoning',at:event.meta?.at,text:event.data?.reasoning});
+        if(event.type==='action.result'){
+          const result=event.data?.result;items.push({role:'tool',at:event.meta?.at,text:`${result?.toolName??'tool'}${result?.isError?' · failed':''}\n${compact(result?.output??'',2500)}`});
         }
-
-        // Backward compatibility for runs created before worker-side normalization.
-        if(event.type!=='agent.output')continue;
-        let obj;try{obj=JSON.parse(String(event.data?.text||''));}catch{continue;}
-        const type=String(obj.type||'');
-        if(type==='message_end'){
-          const msg=obj.message||{};
-          const text=Array.isArray(msg.content)?msg.content.map(x=>x?.text||'').join(''):String(msg.content||'');
-          if(text)push({kind:'message',role:String(msg.role||'assistant'),text,at:event.at});
-        } else if(type==='message_update') {
-          const update=obj.assistantMessageEvent||{};
-          if(update.type==='text_delta') assistant=append(assistant,'assistant',String(update.delta||''),event.at);
-          if(update.type==='thinking_delta') thinking=append(thinking,'thinking',String(update.delta||''),event.at,'thinking');
-        }
+        if(event.type==='message.completed')items.push({role:'assistant',at:event.meta?.at,text:event.data?.message});
       }
       return items;
     }
-
-    const agentActivity = () => {
-      const start=find('agent.started');
-      if(!start)return null;
-      const end=state.events.find((e)=>['agent.completed','agent.timeout','run.cancelled'].includes(e.type));
-      const elapsed=(end?eventTime(end):Date.now())-eventTime(start);
-      const overall=Number(start.data?.timeoutMs||state.run.spec.agent.timeoutMs||900000);
-      const startup=Number(start.data?.startupTimeoutMs||0);
-      const idle=Number(start.data?.idleTimeoutMs||0);
-      const activityEvents=state.events.filter(e=>e.type.startsWith('agent.')&&!['agent.started'].includes(e.type));
-      const last=activityEvents.at(-1);
-      const lastAgo=last?Math.max(0,Date.now()-eventTime(last)):elapsed;
-      return {elapsed,overall,startup,idle,lastAgo,lastType:last?.type||'waiting for first event',pct:Math.min(100,Math.max(0,elapsed/overall*100))};
-    };
-
-    const conversationHtml = () => {
-      const items=conversationItems(state.events);
-      if(!items.length)return '<div class="conversation-empty">Waiting for Pi activity…</div>';
-      return items.map((item)=>'<div class="message '+esc(item.role)+(item.partial?' partial':'')+'"><div class="message-head"><span class="role">'+esc(item.role)+(item.partial?' · live':'')+'</span><span class="time">'+new Date(item.at).toLocaleTimeString()+'</span></div><div class="body">'+esc(item.text)+'</div></div>').join('');
-    };
-
-    function render(){
-      if(!state.run)return;
-      const r=state.run,a=agentActivity(),metrics=agentMetric(),health=workerHealth(),preflight=find('subject.preflight.completed'),spawned=find('agent.process.spawned'),firstOutput=find('agent.first_output');
-      const phases=[['prepare',phase('subject.preparing',['subject.ready'])],['agent',phase('agent.started',['agent.completed','agent.timeout','run.cancelled'])],['verify',phase('verification.started',['run.completed','run.failed'])]];
-      const phaseHtml=phases.map(([name,ms])=>'<div class="phase"><span>'+name+'</span><strong>'+fmt(ms)+'</strong></div>').join('');
-      const artifactHtml=state.artifacts.length?state.artifacts.map((x)=>'<div class="artifact"><strong>'+esc(x.type)+'</strong><div class="muted">'+esc(x.key)+' · '+x.bytes+' bytes</div></div>').join(''):'<div class="muted">No artifacts yet</div>';
-      const timeline=state.events.length?state.events.map(eventLine).join('\n'):'No events yet';
-      const activityHtml=a?'<h2 style="margin-top:18px">Agent activity</h2><div class="row"><span>'+fmt(a.elapsed)+' / '+fmt(a.overall)+'</span><span>last activity '+fmt(a.lastAgo)+' ago</span></div><div class="progress" style="margin-top:8px"><span style="width:'+a.pct+'%"></span></div><div class="meta">startup timeout '+fmt(a.startup)+' · idle timeout '+fmt(a.idle)+' · '+esc(a.lastType)+'</div>':'';
-      document.querySelector('#app').innerHTML='<div class="stack"><div class="card"><div class="row"><div><span class="status '+esc(r.status)+'">'+esc(r.status)+'</span></div><strong>'+fmt(r.elapsedMs)+'</strong></div><div class="meta">'+esc(r.spec.subject.repository)+' @ '+esc(r.spec.subject.githubSha)+'<br>'+esc(r.spec.experiment.path)+'</div>'+activityHtml+(r.error?'<h2 style="margin-top:18px">Error</h2><div class="error"><strong>'+esc(r.errorCode||'error')+'</strong>\n'+esc(r.error)+'</div>':'')+(!terminal.has(r.status)?'<div style="margin-top:16px"><button id="cancel" class="button danger">Cancel run</button></div>':'')+'</div><div class="grid"><div class="card"><h2>Execution</h2><div class="kv"><span class="muted">worker</span><span>'+esc(r.workerId||'—')+'</span><span class="muted">worker health</span><span class="'+health+'">'+health+'</span><span class="muted">lease until</span><span>'+esc(r.leaseUntil||'—')+'</span><span class="muted">attempts</span><span>'+esc(r.attempts)+'</span><span class="muted">target health</span><span class="'+(preflight?.data?.ok?'healthy':'')+'">'+(preflight?preflight.data?.ok?'healthy':'failed':'checking')+'</span><span class="muted">Pi process</span><span>'+(spawned?'PID '+esc(spawned.data?.pid):find('agent.spawn.requested')?'spawning':'not started')+'</span><span class="muted">Pi first output</span><span>'+(firstOutput?fmt(firstOutput.data?.afterMs):spawned?'waiting':'—')+'</span><span class="muted">bootstrap</span><span class="'+(metrics.bootstrap?'healthy':metrics.bootstrapFailed?'error':'')+'">'+(metrics.bootstrap?'ready · '+fmt(metrics.bootstrap.data?.durationMs):metrics.bootstrapFailed?'failed':'not configured')+'</span><span class="muted">model tool calls</span><span>'+metrics.toolCalls+'</span><span class="muted">first model tool</span><span>'+fmt(metrics.firstToolMs)+'</span><span class="muted">first edit/write</span><span>'+fmt(metrics.firstEditMs)+'</span><span class="muted">malformed tool syntax</span><span class="'+(metrics.malformed?'error':'healthy')+'">'+(metrics.malformed?'detected':'none detected')+'</span></div><h2 style="margin-top:18px">Phase timings</h2>'+phaseHtml+'</div><div class="card"><h2>Artifacts</h2>'+artifactHtml+'</div></div><div class="card"><div class="row"><h2>Agent conversation</h2><span id="stream-state" class="pill">'+(terminal.has(r.status)?'finished':'streaming')+'</span></div><div class="section-note">Live semantic events normalized by the Wind Tunnel worker. Full raw Pi JSONL remains an artifact.</div><div id="conversation" class="conversation">'+conversationHtml()+'</div></div><details class="card"><summary style="cursor:pointer;font-weight:700">Raw event timeline</summary><div id="timeline" class="timeline" style="margin-top:12px">'+esc(timeline)+'</div></details></div>';
-      document.querySelector('#cancel')?.addEventListener('click',async()=>{if(!confirm('Cancel this run?'))return;await fetch('/api/runs/'+id+'/cancel',{method:'POST'});await refresh();});
-      const conversation=document.querySelector('#conversation');if(conversation)conversation.scrollTop=conversation.scrollHeight;
+    function render(events){
+      const state=derive(events);const result=state.finish;const changed=Array.isArray(result?.changedFiles)?result.changedFiles:[];const checks=Array.isArray(result?.checks)?result.checks:[];
+      const messages=conversation(events).map(item=>`<article class="rounded-lg border ${item.role==='assistant'?'border-emerald-900':item.role==='tool'?'border-amber-900':item.role==='reasoning'?'border-slate-800 border-dashed':'border-blue-900'} bg-slate-950 p-3"><div class="mb-2 flex justify-between gap-3 font-mono text-xs uppercase tracking-wide text-slate-500"><span>${escapeHtml(item.role)}</span><span>${item.at?new Date(item.at).toLocaleTimeString():'—'}</span></div><pre class="overflow-x-auto whitespace-pre-wrap font-mono text-xs leading-5 text-slate-300">${escapeHtml(item.text)}</pre></article>`).join('');
+      const checkRows=checks.map(check=>`<div class="flex justify-between gap-3 border-b border-slate-800 py-2 text-sm"><span>${escapeHtml(check.name)}</span><strong class="${check.passed?'text-emerald-400':'text-red-400'}">${check.passed?'pass':'fail'}</strong></div>`).join('')||'<div class="text-sm text-slate-500">No finish evidence yet.</div>';
+      document.querySelector('#app').innerHTML=`<section class="rounded-xl border border-slate-800 bg-slate-900 p-4"><div class="flex justify-between gap-4"><span class="font-mono text-xs font-bold uppercase ${state.status==='failed'?'text-red-400':state.status==='completed'?'text-emerald-400':'text-blue-400'}">${state.status}</span><strong>${formatDuration(state.elapsed)}</strong></div>${state.failed?`<pre class="mt-4 whitespace-pre-wrap rounded-lg bg-red-950/40 p-3 font-mono text-xs text-red-300">${escapeHtml(compact(state.failed.data))}</pre>`:''}</section><div class="grid gap-3 md:grid-cols-2"><section class="rounded-xl border border-slate-800 bg-slate-900 p-4"><h2 class="mb-3 font-semibold">Execution</h2><div class="grid grid-cols-[8rem_1fr] gap-2 text-sm"><span class="text-slate-500">runtime</span><span>eve 0.52.5</span><span class="text-slate-500">workflow</span><span>Vercel Workflow</span><span class="text-slate-500">sandbox</span><span>Vercel Sandbox</span><span class="text-slate-500">model</span><span>${escapeHtml(state.model)}</span><span class="text-slate-500">tool calls</span><span>${state.tools.length}</span><span class="text-slate-500">changed files</span><span>${changed.length}</span></div>${state.status==='running'?'<button id="cancel" class="mt-4 rounded-lg border border-red-900 px-3 py-2 text-sm text-red-300">Cancel run</button>':''}</section><section class="rounded-xl border border-slate-800 bg-slate-900 p-4"><h2 class="mb-3 font-semibold">Verification</h2>${checkRows}</section></div><section class="rounded-xl border border-slate-800 bg-slate-900 p-4"><h2 class="mb-3 font-semibold">Changed files</h2>${changed.length?`<pre class="overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-300">${escapeHtml(changed.join('\n'))}</pre>`:'<div class="text-sm text-slate-500">No changes captured.</div>'}</section><section class="rounded-xl border border-slate-800 bg-slate-900 p-4"><h2 class="mb-3 font-semibold">Agent activity</h2><div class="grid max-h-[44rem] gap-2 overflow-auto">${messages||'<div class="text-sm text-slate-500">Waiting for activity…</div>'}</div></section><details class="rounded-xl border border-slate-800 bg-slate-900 p-4"><summary class="cursor-pointer font-semibold">Raw eve events (${events.length})</summary><pre class="mt-3 max-h-[32rem] overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-3 font-mono text-xs text-slate-400">${escapeHtml(events.map(event=>`${event.meta?.at??''}  ${event.type}  ${compact(event.data??{},800)}`).join('\n'))}</pre></details>`;
+      document.querySelector('#cancel')?.addEventListener('click',async()=>{if(confirm('Cancel active eve turn?'))await fetch(`/api/sessions/${encodeURIComponent(id)}`,{method:'DELETE'});});
+      return state.status;
     }
-
-    async function refresh(){
-      const [runResponse,eventResponse,artifactResponse]=await Promise.all([fetch('/api/runs/'+id),fetch('/api/runs/'+id+'/events?limit=1000'),fetch('/api/runs/'+id+'/artifacts')]);
-      if(!runResponse.ok)return;
-      state={run:await runResponse.json(),events:(await eventResponse.json()).events,artifacts:(await artifactResponse.json()).artifacts};
-      render();
-    }
-
-    render();
-    if(state.run&&!terminal.has(state.run.status)){
-      const source=new EventSource('/api/runs/'+id+'/stream');
-      source.addEventListener('run',()=>refresh());
-      source.addEventListener('heartbeat',()=>refresh());
-      source.addEventListener('terminal',()=>{refresh();source.close();});
-      source.onerror=()=>{const el=document.querySelector('#stream-state');if(el)el.textContent='reconnecting';};
-      setInterval(()=>{if(!terminal.has(state.run.status))refresh();},1000);
-    }
+    async function refresh(){const response=await fetch(`/api/sessions/${encodeURIComponent(id)}`);if(!response.ok){document.querySelector('#app').innerHTML=`<div class="rounded-xl border border-red-900 bg-red-950/30 p-4 text-red-300">${escapeHtml(await response.text())}</div>`;return 'failed';}const payload=await response.json();return render(payload.events??[]);}
+    remember();
+    let status=await refresh();
+    const timer=setInterval(async()=>{if(document.visibilityState==='visible')status=await refresh();if(status!=='running')clearInterval(timer);},2000);
   </script>
 </Layout>
