@@ -36,7 +36,7 @@ const initial = JSON.stringify({run,events,artifacts}).replace(/</g,'\\u003c');
       const start=find('agent.started');
       const toolEvents=state.events.filter(e=>e.type==='agent.tool.started');
       const firstTool=toolEvents[0];
-      const firstEdit=toolEvents.find(e=>e.data?.name==='edit'||e.data?.name==='write');
+      const firstEdit=toolEvents.find(e=>['edit','write','apply_patch'].includes(String(e.data?.name||'')));
       const bootstrap=find('bootstrap.completed');
       const bootstrapFailed=find('bootstrap.failed');
       const malformed=Boolean(find('agent.tool.malformed'))||state.events.some(e=>e.type==='agent.message.delta'&&/to=functions\.|to=functions\//.test(String(e.data?.text||'')));
