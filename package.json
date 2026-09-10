@@ -17,6 +17,7 @@
   "dependencies": {
     "ai": "^7.0.97",
     "eve": "0.52.5",
+    "postgres": "^3.4.9",
     "zod": "^4.6.1"
   },
   "devDependencies": {

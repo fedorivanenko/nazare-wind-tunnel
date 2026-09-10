@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
+import { preparedRun } from "../lib/run-state";
 import {
 	bounded,
 	parseExperiment,
+	parseToolManifest,
 	REPOSITORY_ROOT,
 	requiredText,
 	safeRepositoryPath,
@@ -56,6 +59,19 @@ export default defineTool({
 			}),
 			"Task",
 		);
+		const toolManifestText = experiment.tools?.manifest
+			? requiredText(
+					await sandbox.readTextFile({
+						path: safeRepositoryPath(experiment.tools.manifest),
+					}),
+					"Tool manifest",
+				)
+			: null;
+		const declaredTools = toolManifestText
+			? parseToolManifest(toolManifestText)
+			: [];
+		const allowedTools = new Set(experiment.tools?.allow ?? []);
+		const tools = declaredTools.filter((tool) => allowedTools.has(tool.name));
 		const bootstrap = [] as Array<{ id: string; output: unknown }>;
 		for (const entry of experiment.tools?.bootstrap ?? []) {
 			const inputPath = `/workspace/.wind-tunnel-bootstrap-${bootstrap.length}.json`;
@@ -79,11 +95,17 @@ export default defineTool({
 				bootstrap.push({ id: entry.id, output });
 			}
 		}
-		return {
-			repositoryRoot: REPOSITORY_ROOT,
+		const prepared = {
 			experimentPath,
 			task: bounded(task, 40_000),
 			bootstrap,
+			tools,
+			toolManifestSha256: toolManifestText
+				? createHash("sha256").update(toolManifestText).digest("hex")
+				: null,
+			preparedAt: new Date().toISOString(),
 		};
+		preparedRun.update(() => prepared);
+		return { repositoryRoot: REPOSITORY_ROOT, ...prepared };
 	},
 });

@@ -15,11 +15,14 @@ GitHub Action
   - creates credential-free git archive
         |
         v
-Vercel eve HTTP channel
+Wind Tunnel run API + PostgreSQL registry
         |
-        +-- Vercel Workflow: durable session and event stream
-        +-- Vercel AI Gateway: pinned model
-        +-- Vercel Sandbox: isolated source mutation and verification
+        v
+Vercel eve Workflow
+        |
+        +-- mutation sandbox: target preparation, dynamic tools, model edits
+        +-- fresh verification sandbox: captured patch + untouched evaluator
+        +-- PostgreSQL event mirror: runs, model activity, tools, evidence
 ```
 
 Vercel is the only runtime. The former Railway API, worker, PostgreSQL queue, storage adapters, and Docker deployment path have been removed.
@@ -34,8 +37,10 @@ Inside sandbox:
 2. It initializes credential-free local Git baseline.
 3. It installs dependencies with pinned pnpm `10.17.1`.
 4. Network changes to `deny-all` before subject bootstrap/model shell execution.
-5. Agent mutates candidate.
-6. `finish_run` executes trusted experiment verification and captures staged binary Git patch.
+5. Target-owned tool manifests are validated and exposed dynamically by eve.
+6. Agent mutates candidate.
+7. `finish_run` captures the binary patch and destroys the mutation sandbox.
+8. A fresh sandbox rematerializes exact source, applies only the captured patch, and runs the untouched evaluator.
 
 No clone, fetch, push, or golden reference occurs in agent sandbox.
 
@@ -127,7 +132,7 @@ pnpm deploy
 
 ## Dashboard
 
-The preserved Astro dashboard now reads durable eve session streams through a server-side authenticated proxy. It shows execution status, model/tool activity, verification evidence, changed files, and raw redacted events. Viewed session IDs remain local to the browser because eve does not expose a session-list endpoint.
+The Astro dashboard reads the PostgreSQL-backed run registry and durable eve session streams through a server-side authenticated proxy. It automatically lists runs and shows execution status, model/tool activity, verification evidence, changed files, and raw redacted events.
 
 ```text
 fedor-studio/nazare-wind-tunnel-dashboard
@@ -142,6 +147,7 @@ eve project production environment:
 
 ```text
 WIND_TUNNEL_TOKEN
+DATABASE_URL
 ```
 
 Dashboard project production environment:

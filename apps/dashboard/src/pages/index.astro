@@ -1,44 +1,47 @@
 ---
 import Layout from "../layouts/Layout.astro";
+import { eveJson } from "../lib/eve";
+
+type Run = {
+	id: string;
+	sessionId: string | null;
+	status: string;
+	repository: string;
+	sourceSha: string;
+	experimentPath: string;
+	createdAt: string;
+	updatedAt: string;
+};
+let runs: Run[] = [];
+let loadError = "";
+try {
+	runs = (await eveJson<{ runs: Run[] }>("/api/runs?limit=50")).runs;
+} catch (error) {
+	loadError = error instanceof Error ? error.message : String(error);
+}
 ---
 <Layout>
   <div class="mb-6 flex flex-col justify-between gap-4 md:flex-row md:items-start">
     <div><div class="font-mono text-xs uppercase tracking-wider text-slate-500">Nazare · eve</div><h1 class="mt-1 text-2xl font-bold">Wind Tunnel</h1></div>
     <a class="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 hover:border-slate-500" href="/status">System status</a>
   </div>
-  <div class="grid gap-3 md:grid-cols-2">
+  <div class="mb-6 grid gap-3 md:grid-cols-2">
     <section class="rounded-xl border border-slate-800 bg-slate-900 p-4">
-      <h2 class="mb-2 font-semibold">Open session</h2>
-      <p class="mb-3 text-sm text-slate-400">Inspect durable eve run by session ID.</p>
-      <form id="open-session" class="flex gap-2">
-        <input class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-sm outline-none focus:border-blue-500" id="session-id" name="sessionId" placeholder="wrun_…" required pattern="wrun_[A-Z0-9]+" autocomplete="off" />
-        <button class="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 hover:border-slate-500" type="submit">Open</button>
-      </form>
+      <h2 class="mb-2 font-semibold">Runs</h2>
+      <p class="text-sm text-slate-400">Durable run registry with live eve events and fresh-sandbox verification.</p>
     </section>
     <section class="rounded-xl border border-slate-800 bg-slate-900 p-4">
-      <h2 class="mb-3 font-semibold">Runtime</h2>
       <div class="grid grid-cols-[8rem_1fr] gap-2 text-sm">
         <span class="text-slate-500">orchestration</span><span>Vercel Workflow</span>
         <span class="text-slate-500">agent</span><span>eve 0.52.5</span>
         <span class="text-slate-500">isolation</span><span>Vercel Sandbox</span>
-        <span class="text-slate-500">model</span><span>openai/gpt-oss-120b</span>
+        <span class="text-slate-500">verification</span><span>fresh sandbox</span>
       </div>
     </section>
   </div>
-  <section class="mt-6">
-    <div class="mb-3 flex items-center justify-between"><h2 class="font-semibold">Viewed sessions</h2><button id="clear" class="text-sm text-slate-500 hover:text-slate-200" type="button">Clear</button></div>
-    <div id="runs" class="grid gap-2"><div class="rounded-xl border border-dashed border-slate-800 p-4 text-slate-500">No sessions viewed in this browser.</div></div>
+  <section>
+    <div class="mb-3 flex items-center justify-between"><h2 class="font-semibold">Recent runs</h2><span class="font-mono text-xs text-slate-500">{runs.length}</span></div>
+    {loadError?<pre class="rounded-xl border border-red-900 bg-red-950/30 p-4 font-mono text-xs text-red-300">{loadError}</pre>:runs.length===0?<div class="rounded-xl border border-dashed border-slate-800 p-4 text-slate-500">No runs yet.</div>:<div class="grid gap-2">{runs.map(run=>run.sessionId?<a class="block rounded-xl border border-slate-800 bg-slate-900 p-4 hover:border-slate-600" href={`/runs/${run.sessionId}`}><div class="flex items-center justify-between gap-3"><strong class="font-mono text-sm">{run.repository} @ {run.sourceSha.slice(0,10)}</strong><span class:list={["font-mono text-xs font-bold uppercase",{"text-emerald-400":run.status==="completed","text-red-400":run.status==="failed","text-blue-400":["accepted","preparing","running"].includes(run.status)}]}>{run.status}</span></div><div class="mt-2 font-mono text-xs text-slate-500">{run.experimentPath} · {new Date(run.createdAt).toLocaleString()}</div></a>:<div class="rounded-xl border border-slate-800 bg-slate-900 p-4"><div class="font-mono text-sm">{run.repository} @ {run.sourceSha.slice(0,10)}</div><div class="mt-2 font-mono text-xs text-slate-500">accepted · waiting for eve session</div></div>)}</div>}
   </section>
-  <script>
-    const key='nazare-eve-sessions';
-    const read=()=>{try{return JSON.parse(localStorage.getItem(key)||'[]')}catch{return []}};
-    const escapeHtml=(value)=>String(value).replace(/[&<>\"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[char]));
-    const render=()=>{
-      const sessions=read();const root=document.querySelector('#runs');if(!root)return;
-      root.innerHTML=sessions.length?sessions.map(item=>`<a class="block rounded-xl border border-slate-800 bg-slate-900 p-4 hover:border-slate-600" href="/runs/${encodeURIComponent(item.id)}"><div class="flex items-center justify-between gap-3"><strong class="font-mono text-sm">${escapeHtml(item.id)}</strong><span class="font-mono text-xs text-slate-500">eve</span></div><div class="mt-2 font-mono text-xs text-slate-500">last viewed ${new Date(item.at).toLocaleString()}</div></a>`).join(''):'<div class="rounded-xl border border-dashed border-slate-800 p-4 text-slate-500">No sessions viewed in this browser.</div>';
-    };
-    document.querySelector('#open-session')?.addEventListener('submit',event=>{event.preventDefault();const input=document.querySelector('#session-id');const id=input?.value.trim();if(id&&/^wrun_[A-Z0-9]+$/.test(id))location.href='/runs/'+encodeURIComponent(id);});
-    document.querySelector('#clear')?.addEventListener('click',()=>{localStorage.removeItem(key);render();});
-    render();
-  </script>
+  <script>if(document.visibilityState==='visible')setTimeout(()=>location.reload(),5000);</script>
 </Layout>
