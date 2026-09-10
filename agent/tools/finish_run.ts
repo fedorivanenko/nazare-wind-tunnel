@@ -33,6 +33,12 @@ function protectedPath(relativePath: string) {
 	);
 }
 
+function insideAnyPath(file: string, allowedPaths: string[]) {
+	return allowedPaths.some(
+		(prefix) => file === prefix || file.startsWith(`${prefix}/`),
+	);
+}
+
 export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	const modelPhaseEndedAt = new Date().toISOString();
 	const prepared = preparedRun.get();
@@ -45,7 +51,8 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	);
 	const experiment = parseExperiment(experimentText);
 	const archiveLookup = await mutationSandbox.run({
-		command: "find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
+		command:
+			"find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
 	});
 	if (archiveLookup.exitCode !== 0 || !archiveLookup.stdout.trim())
 		throw new Error("Exact source archive is unavailable for verification");
@@ -76,7 +83,8 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	const rawDiff = await mutationSandbox.run({
 		command: `cd ${REPOSITORY_ROOT} && git diff --cached --raw`,
 	});
-	if (rawDiff.exitCode !== 0) throw new Error("Candidate mode inspection failed");
+	if (rawDiff.exitCode !== 0)
+		throw new Error("Candidate mode inspection failed");
 	if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
 		throw new Error("Candidate patch may not create or modify symbolic links");
 
@@ -85,16 +93,26 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		throw new Error(
 			`Candidate patch modifies protected or generated paths: ${forbidden.join(", ")}`,
 		);
-	if (experiment.allowedPaths?.length) {
+
+	const experimentAllowedPaths = experiment.allowedPaths ?? [];
+	if (experimentAllowedPaths.length) {
 		const outsideAllowedPaths = changedFiles.filter(
-			(file) =>
-				!experiment.allowedPaths?.some(
-					(prefix) => file === prefix || file.startsWith(`${prefix}/`),
-				),
+			(file) => !insideAnyPath(file, experimentAllowedPaths),
 		);
 		if (outsideAllowedPaths.length)
 			throw new Error(
-				`Candidate patch modifies paths outside allowedPaths: ${outsideAllowedPaths.join(", ")}`,
+				`Candidate patch modifies paths outside experiment allowedPaths: ${outsideAllowedPaths.join(", ")}`,
+			);
+	}
+
+	const compiledMutationPaths = prepared?.mutationPaths ?? [];
+	if (compiledMutationPaths.length) {
+		const outsideMutationSet = changedFiles.filter(
+			(file) => !insideAnyPath(file, compiledMutationPaths),
+		);
+		if (outsideMutationSet.length)
+			throw new Error(
+				`Candidate patch escapes compiled mutation set: ${outsideMutationSet.join(", ")}. Allowed: ${compiledMutationPaths.join(", ")}`,
 			);
 	}
 
@@ -160,6 +178,12 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		patch: bounded(staged.stdout),
 		patchSha256: createHash("sha256").update(staged.stdout).digest("hex"),
 		preparedDependencyKey: prepared?.preparedDependencyKey ?? null,
+		mutationBoundary: {
+			compiled: compiledMutationPaths.length > 0,
+			allowedPaths: compiledMutationPaths,
+			changedFiles,
+			passed: true,
+		},
 		timings: prepared
 			? {
 					preparationStartedAt: prepared.preparationStartedAt,
@@ -179,7 +203,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 
 export default defineTool({
 	description:
-		"Capture the candidate patch, rebuild it in a fresh sandbox, and run trusted progressive verification. Call exactly once after implementation.",
+		"Capture the candidate patch, enforce compiled mutation boundaries, rebuild it in a fresh sandbox, and run trusted progressive verification. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Verify candidate in fresh sandbox" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
