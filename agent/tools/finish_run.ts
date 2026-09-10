@@ -123,7 +123,10 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	}
 
 	const mutationRanges = prepared?.mutationRanges ?? [];
-	const escapedHunks = escapingSymbolHunks(zeroContextDiff.stdout, mutationRanges);
+	const escapedHunks = escapingSymbolHunks(
+		zeroContextDiff.stdout,
+		mutationRanges,
+	);
 	if (escapedHunks.length)
 		throw new Error(
 			`Candidate patch escapes compiled symbol boundaries: ${escapedHunks
