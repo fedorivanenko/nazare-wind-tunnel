@@ -23,6 +23,8 @@ export type PreparedRun = {
 	tools: RuntimeTool[];
 	toolManifestSha256: string | null;
 	modelTimeoutMs: number;
+	preparationStartedAt: string;
+	preparationDurationMs: number;
 	preparedAt: string;
 };
 

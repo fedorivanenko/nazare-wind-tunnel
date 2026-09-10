@@ -16,6 +16,8 @@ export async function prepareSubject(
 	experimentPath: string,
 	ctx: Pick<ToolContext, "getSandbox">,
 ) {
+	const preparationStartedAt = new Date().toISOString();
+	const preparationStartedMs = Date.now();
 	const sandbox = await ctx.getSandbox();
 	const experimentFile = safeRepositoryPath(experimentPath);
 	const prepare = await sandbox.run({
@@ -104,6 +106,8 @@ export async function prepareSubject(
 			? createHash("sha256").update(toolManifestText).digest("hex")
 			: null,
 		modelTimeoutMs: experiment.agent?.timeoutMs ?? 30_000,
+		preparationStartedAt,
+		preparationDurationMs: Date.now() - preparationStartedMs,
 		preparedAt,
 	};
 	preparedRun.update(() => prepared);

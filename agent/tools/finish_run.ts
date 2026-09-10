@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 import { resolveEvaluator } from "../lib/evaluators";
+import { preparedRun } from "../lib/run-state";
 import {
 	bounded,
 	parseExperiment,
@@ -38,6 +39,8 @@ export default defineTool({
 	inputSchema: z.object({}),
 	label: { start: () => "Verify candidate in fresh sandbox" },
 	async execute(_input, ctx) {
+		const modelPhaseEndedAt = new Date().toISOString();
+		const prepared = preparedRun.get();
 		const mutationSandbox = await ctx.getSandbox();
 		const experimentText = requiredText(
 			await mutationSandbox.readTextFile({
@@ -152,9 +155,11 @@ export default defineTool({
 			exitCode: number;
 			stdout: string;
 			stderr: string;
+			durationMs: number;
 		}>;
 		for (const check of evaluator.checks) {
 			const seconds = Math.max(1, Math.ceil(check.timeoutMs / 1_000));
+			const checkStartedMs = Date.now();
 			const result = await verificationSandbox.run({
 				command: `cd ${REPOSITORY_ROOT} && timeout ${seconds}s bash -lc ${shellQuote(check.command)}`,
 			});
@@ -166,6 +171,7 @@ export default defineTool({
 				exitCode: result.exitCode,
 				stdout: bounded(result.stdout, 20_000),
 				stderr: bounded(result.stderr, 20_000),
+				durationMs: Date.now() - checkStartedMs,
 			});
 		}
 		const passed = checks
@@ -178,6 +184,17 @@ export default defineTool({
 			checks,
 			patch: bounded(staged.stdout),
 			patchSha256: createHash("sha256").update(staged.stdout).digest("hex"),
+			timings: prepared
+				? {
+						preparationStartedAt: prepared.preparationStartedAt,
+						preparationDurationMs: prepared.preparationDurationMs,
+						modelPhaseStartedAt: prepared.preparedAt,
+						modelPhaseEndedAt,
+						modelPhaseDurationMs:
+							Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
+						modelPhaseBudgetMs: prepared.modelTimeoutMs,
+					}
+				: null,
 			verificationIsolation: "fresh-sandbox",
 		};
 	},

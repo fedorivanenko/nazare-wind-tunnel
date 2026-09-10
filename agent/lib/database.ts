@@ -116,8 +116,14 @@ export async function attachSession(runId: string, sessionId: string) {
 
 export async function listRuns(limit = 50) {
 	await initialize();
+	const database = sql();
+	await database`
+		update wind_tunnel_runs
+		set status='failed', error=${database.json({ code: "stale_run", message: "Run stopped updating before reaching a terminal state" })}, updated_at=now(), finished_at=now()
+		where status in ('accepted','preparing','running') and updated_at < now() - interval '20 minutes'
+	`;
 	const rows =
-		await sql()`select * from wind_tunnel_runs order by created_at desc limit ${Math.min(100, Math.max(1, limit))}`;
+		await database`select * from wind_tunnel_runs order by created_at desc limit ${Math.min(100, Math.max(1, limit))}`;
 	return rows.map(mapRun);
 }
 
@@ -193,7 +199,11 @@ export async function finishRun(sessionId: string, result: unknown) {
 	const database = sql();
 	const passed = Boolean((result as { passed?: unknown } | null)?.passed);
 	await database`
-		update wind_tunnel_runs set status=${passed ? "completed" : "failed"}, result=${database.json(result as never)}, updated_at=now(), finished_at=now()
+		update wind_tunnel_runs
+		set status=${passed ? "completed" : "failed"},
+			result=${database.json(result as never)},
+			error=${passed ? null : database.json({ code: "verification_failed", message: "One or more required evaluator checks failed" })},
+			updated_at=now(), finished_at=now()
 		where session_id=${sessionId}
 	`;
 }
