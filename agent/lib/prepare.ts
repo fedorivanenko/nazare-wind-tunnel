@@ -6,7 +6,7 @@ import {
 	dependencyKey,
 	loadSubjectContract,
 } from "./prepared-subject";
-import { preparedRun } from "./run-state";
+import { preparedRun, type MutationRange } from "./run-state";
 import {
 	bounded,
 	parseExperiment,
@@ -17,22 +17,52 @@ import {
 	shellQuote,
 } from "./subject";
 
-function mutationPathsFromBootstrap(
+function mutationContractFromBootstrap(
 	bootstrap: Array<{ id: string; output: unknown }>,
 ) {
 	const paths = new Set<string>();
+	const ranges: MutationRange[] = [];
 	for (const entry of bootstrap) {
 		if (!entry.output || typeof entry.output !== "object") continue;
 		const mutationSet = (entry.output as { mutationSet?: unknown }).mutationSet;
 		if (!mutationSet || typeof mutationSet !== "object") continue;
 		const files = (mutationSet as { files?: unknown }).files;
-		if (!Array.isArray(files)) continue;
-		for (const file of files) {
-			if (typeof file !== "string" || !file.trim()) continue;
-			paths.add(file.trim().replace(/^\.\//, ""));
+		if (Array.isArray(files)) {
+			for (const file of files) {
+				if (typeof file !== "string" || !file.trim()) continue;
+				paths.add(file.trim().replace(/^\.\//, ""));
+			}
+		}
+		const rawRanges = (mutationSet as { ranges?: unknown }).ranges;
+		if (!Array.isArray(rawRanges)) continue;
+		for (const raw of rawRanges) {
+			if (!raw || typeof raw !== "object") continue;
+			const value = raw as Record<string, unknown>;
+			if (
+				typeof value.file !== "string" ||
+				typeof value.symbol !== "string" ||
+				typeof value.startLine !== "number" ||
+				typeof value.endLine !== "number" ||
+				!Number.isInteger(value.startLine) ||
+				!Number.isInteger(value.endLine) ||
+				value.startLine < 1 ||
+				value.endLine < value.startLine
+			)
+				continue;
+			ranges.push({
+				file: value.file.trim().replace(/^\.\//, ""),
+				symbol: value.symbol,
+				startLine: value.startLine,
+				endLine: value.endLine,
+			});
 		}
 	}
-	return [...paths].sort();
+	return {
+		paths: [...paths].sort(),
+		ranges: ranges.sort((a, b) =>
+			a.file === b.file ? a.startLine - b.startLine : a.file.localeCompare(b.file),
+		),
+	};
 }
 
 export async function prepareSubject(
@@ -73,7 +103,7 @@ export async function prepareSubject(
 
 	const dependencyInstallStartedMs = Date.now();
 	const dependencyInstall = await sandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline`,
+		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline --store-dir /workspace/.pnpm-store`,
 	});
 	const dependencyInstallMs = Date.now() - dependencyInstallStartedMs;
 	if (dependencyInstall.exitCode !== 0)
@@ -147,7 +177,7 @@ export async function prepareSubject(
 		}
 	}
 	const bootstrapMs = Date.now() - bootstrapStartedMs;
-	const mutationPaths = mutationPathsFromBootstrap(bootstrap);
+	const mutationContract = mutationContractFromBootstrap(bootstrap);
 	const preparedAt = new Date().toISOString();
 	const preparationTimings = {
 		sandboxAcquireMs,
@@ -166,7 +196,8 @@ export async function prepareSubject(
 			: null,
 		preparedDependencyKey,
 		compiledSubject,
-		mutationPaths,
+		mutationPaths: mutationContract.paths,
+		mutationRanges: mutationContract.ranges,
 		modelTimeoutMs: experiment.agent?.timeoutMs ?? 30_000,
 		preparationStartedAt,
 		preparationDurationMs: Date.now() - preparationStartedMs,
