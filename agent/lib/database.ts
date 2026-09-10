@@ -118,7 +118,11 @@ export async function listRuns(limit = 50) {
 export async function getRun(id: string) {
 	await initialize();
 	const rows =
-		await sql()`select * from wind_tunnel_runs where id=${id} or session_id=${id} limit 1`;
+		/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+			id,
+		)
+			? await sql()`select * from wind_tunnel_runs where id=${id} limit 1`
+			: await sql()`select * from wind_tunnel_runs where session_id=${id} limit 1`;
 	return rows[0] ? mapRun(rows[0]) : null;
 }
 
