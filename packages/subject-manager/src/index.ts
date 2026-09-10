@@ -1,6 +1,6 @@
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
-import {existsSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, writeFileSync} from 'node:fs';
 import {mkdir, readFile, rm, symlink, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 
@@ -74,10 +74,18 @@ export function subjectRuntimeEnv(extra:NodeJS.ProcessEnv={}):NodeJS.ProcessEnv 
 }
 
 function gitRuntimeEnv():NodeJS.ProcessEnv {
+  const sshKey=process.env.WIND_TUNNEL_GITHUB_SSH_KEY_B64;
+  if(sshKey){
+    const authDirectory=path.join(WORKSPACE_ROOT,'.wind-tunnel','git-auth');const keyPath=path.join(authDirectory,'github-readonly');const knownHosts=path.join(authDirectory,'known_hosts');
+    mkdirSync(authDirectory,{recursive:true,mode:0o700});writeFileSync(keyPath,Buffer.from(sshKey,'base64').toString('utf8'),{mode:0o600});chmodSync(keyPath,0o600);
+    return subjectRuntimeEnv({GIT_TERMINAL_PROMPT:'0',GIT_SSH_COMMAND:`ssh -i ${keyPath} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${knownHosts}`});
+  }
   const token=process.env.WIND_TUNNEL_GITHUB_TOKEN;
   if(!token)return subjectRuntimeEnv({GIT_TERMINAL_PROMPT:'0'});
   return subjectRuntimeEnv({GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_COUNT:'1',GIT_CONFIG_KEY_0:'http.extraHeader',GIT_CONFIG_VALUE_0:`AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`});
 }
+
+function githubRemote(repository:string){return process.env.WIND_TUNNEL_GITHUB_SSH_KEY_B64?`git@github.com:${repository}.git`:`https://github.com/${repository}.git`;}
 
 export async function runSubjectProcess(file: string, args: string[], cwd: string, timeoutMs = 10 * 60 * 1000, observer?: SubjectProcessObserver, options:ProcessOptions={}): Promise<ProcessResult> {
   const started = Date.now();
@@ -151,15 +159,15 @@ async function writeState(state: SubjectState) {
 export async function ensureSubject(repository: string, githubSha: string, observer?: SubjectProcessObserver) {
   assertRepository(repository);
   if (!/^[0-9a-f]{40}$/i.test(githubSha)) throw new Error('sourceSha must be a full 40-character commit SHA');
-  const cwd = subjectPath(repository);const gitEnv=gitRuntimeEnv();
+  const cwd=subjectPath(repository);const gitEnv=gitRuntimeEnv();const remote=githubRemote(repository);
   await mkdir(path.dirname(cwd), {recursive: true});
   await mkdir(path.join(WORKSPACE_ROOT,'.wind-tunnel','home'),{recursive:true});
 
   if (!existsSync(path.join(cwd, '.git'))) {
     await mkdir(cwd,{recursive:true});
     await must(await runSubjectProcess('git',['init'],cwd,30_000,observer,{env:gitEnv}),'git init');
-    await must(await runSubjectProcess('git',['remote','add','origin',`https://github.com/${repository}.git`],cwd,30_000,observer,{env:gitEnv}),'git remote add');
-  }
+    await must(await runSubjectProcess('git',['remote','add','origin',remote],cwd,30_000,observer,{env:gitEnv}),'git remote add');
+  }else await must(await runSubjectProcess('git',['remote','set-url','origin',remote],cwd,30_000,observer,{env:gitEnv}),'git remote set-url');
 
   await must(await runSubjectProcess('git',['fetch','--no-tags','--force','origin',githubSha],cwd,10*60*1000,observer,{env:gitEnv}),'git fetch exact commit');
   await must(await runSubjectProcess('git',['reset','--hard',githubSha],cwd,60_000,observer,{env:gitEnv}),'git reset');

@@ -171,10 +171,11 @@ WIND_TUNNEL_ALLOWED_MODELS_JSON=["vercel-ai-gateway:openai/gpt-oss-20b","vercel-
 Private subjects additionally require worker-only fine-grained GitHub token with read-only repository contents access:
 
 ```text
-WIND_TUNNEL_GITHUB_TOKEN
+WIND_TUNNEL_GITHUB_SSH_KEY_B64
+# or: WIND_TUNNEL_GITHUB_TOKEN
 ```
 
-Git authentication travels through process environment configuration, never URL/arguments/logs. Pi and subject-code subprocesses receive sanitized environments without database, object-storage, control-plane, or GitHub credentials.
+Prefer repository-scoped read-only deploy key. Git authentication travels through process environment configuration, never URL/arguments/logs. Pi and subject-code subprocesses receive sanitized environments without database, object-storage, control-plane, or GitHub credentials.
 
 Model/provider credentials required by Pi also belong on the worker service. Vercel AI Gateway uses `AI_GATEWAY_API_KEY`.
 
