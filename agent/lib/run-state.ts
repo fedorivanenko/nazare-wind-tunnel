@@ -23,7 +23,12 @@ export type PreparedRun = {
 	tools: RuntimeTool[];
 	toolManifestSha256: string | null;
 	preparedDependencyKey: string | null;
-	compiledSubject: { outputPath: string; stdout: string } | null;
+	compiledSubject: {
+		outputPath: string;
+		sha256: string;
+		bytes: number;
+		stdout: string;
+	} | null;
 	modelTimeoutMs: number;
 	preparationStartedAt: string;
 	preparationDurationMs: number;
