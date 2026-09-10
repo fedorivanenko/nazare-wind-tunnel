@@ -48,6 +48,14 @@ function insideAnyPath(file: string, allowedPaths: string[]) {
 export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	const modelPhaseEndedAt = new Date().toISOString();
 	const prepared = preparedRun.get();
+	if (
+		prepared &&
+		Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt) >
+			prepared.modelTimeoutMs
+	)
+		throw new Error(
+			`Model phase exceeded ${prepared.modelTimeoutMs}ms post-preparation budget before finalization`,
+		);
 	const mutationSandbox = await ctx.getSandbox();
 	const experimentText = requiredText(
 		await mutationSandbox.readTextFile({
