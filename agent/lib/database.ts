@@ -60,6 +60,11 @@ async function initialize() {
 			)
 		`;
 		await database`create index if not exists wind_tunnel_events_run_at on wind_tunnel_events(run_id, emitted_at)`;
+		await database`
+			update wind_tunnel_runs
+			set error=${database.json({ code: "verification_failed", message: "One or more required evaluator checks failed" })}
+			where status='failed' and result is not null and error is null
+		`;
 	})();
 	return initialized;
 }
