@@ -6,7 +6,7 @@ import {
 	dependencyKey,
 	loadSubjectContract,
 } from "./prepared-subject";
-import { preparedRun, type MutationRange } from "./run-state";
+import { type MutationRange, preparedRun } from "./run-state";
 import {
 	bounded,
 	parseExperiment,
@@ -60,7 +60,9 @@ function mutationContractFromBootstrap(
 	return {
 		paths: [...paths].sort(),
 		ranges: ranges.sort((a, b) =>
-			a.file === b.file ? a.startLine - b.startLine : a.file.localeCompare(b.file),
+			a.file === b.file
+				? a.startLine - b.startLine
+				: a.file.localeCompare(b.file),
 		),
 	};
 }
