@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { defineTool, type ToolContext } from "eve/tools";
 import { z } from "zod";
 import { resolveEvaluator } from "../lib/evaluators";
+import { escapingSymbolHunks } from "../lib/mutation-boundary";
 import { preparedRun } from "../lib/run-state";
 import {
 	bounded,
@@ -69,6 +70,11 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		throw new Error(
 			`Candidate capture failed: ${bounded(staged.stderr || staged.stdout, 20_000)}`,
 		);
+	const zeroContextDiff = await mutationSandbox.run({
+		command: `cd ${REPOSITORY_ROOT} && git diff --cached --unified=0 --no-ext-diff`,
+	});
+	if (zeroContextDiff.exitCode !== 0)
+		throw new Error("Candidate hunk inspection failed");
 	const names = await mutationSandbox.run({
 		command: `cd ${REPOSITORY_ROOT} && git diff --cached --name-only`,
 	});
@@ -116,6 +122,18 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			);
 	}
 
+	const mutationRanges = prepared?.mutationRanges ?? [];
+	const escapedHunks = escapingSymbolHunks(zeroContextDiff.stdout, mutationRanges);
+	if (escapedHunks.length)
+		throw new Error(
+			`Candidate patch escapes compiled symbol boundaries: ${escapedHunks
+				.map(
+					(hunk) =>
+						`${hunk.file} @@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount}`,
+				)
+				.join("; ")}`,
+		);
+
 	await mutationSandbox.delete();
 
 	const verificationSandboxAcquireStartedMs = Date.now();
@@ -161,7 +179,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 
 	const verificationDependencyInstallStartedMs = Date.now();
 	const dependencyInstall = await verificationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline`,
+		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline --store-dir /workspace/.pnpm-store`,
 	});
 	const verificationDependencyInstallMs =
 		Date.now() - verificationDependencyInstallStartedMs;
@@ -196,6 +214,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		mutationBoundary: {
 			compiled: compiledMutationPaths.length > 0,
 			allowedPaths: compiledMutationPaths,
+			allowedSymbols: mutationRanges,
 			changedFiles,
 			passed: true,
 		},
@@ -223,7 +242,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 
 export default defineTool({
 	description:
-		"Capture the candidate patch, enforce compiled mutation boundaries, rebuild it in a fresh sandbox, and run trusted progressive verification. Call exactly once after implementation.",
+		"Capture the candidate patch, enforce compiled file and symbol mutation boundaries, rebuild it in a fresh sandbox, and run trusted progressive verification. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Verify candidate in fresh sandbox" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
