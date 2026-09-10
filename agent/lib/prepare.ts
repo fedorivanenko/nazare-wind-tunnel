@@ -41,9 +41,14 @@ export async function prepareSubject(
 ) {
 	const preparationStartedAt = new Date().toISOString();
 	const preparationStartedMs = Date.now();
+
+	const sandboxAcquireStartedMs = Date.now();
 	const sandbox = await ctx.getSandbox();
+	const sandboxAcquireMs = Date.now() - sandboxAcquireStartedMs;
 	const experimentFile = safeRepositoryPath(experimentPath);
-	const prepare = await sandbox.run({
+
+	const sourceSetupStartedMs = Date.now();
+	const sourceSetup = await sandbox.run({
 		command: [
 			"set -euo pipefail",
 			"archive=$(find /workspace/attachments -type f -name 'source.tar.gz' -print -quit)",
@@ -58,14 +63,25 @@ export async function prepareSubject(
 			"git add -A",
 			"git commit -q -m 'Exact source baseline'",
 			"test -f pnpm-lock.yaml",
-			"pnpm install --frozen-lockfile --prefer-offline",
 		].join("\n"),
 	});
-	if (prepare.exitCode !== 0)
+	const sourceSetupMs = Date.now() - sourceSetupStartedMs;
+	if (sourceSetup.exitCode !== 0)
 		throw new Error(
-			`Subject preparation failed with exit ${prepare.exitCode}: ${bounded(prepare.stderr || prepare.stdout || "no command output", 20_000)}`,
+			`Subject source setup failed with exit ${sourceSetup.exitCode}: ${bounded(sourceSetup.stderr || sourceSetup.stdout || "no command output", 20_000)}`,
 		);
 
+	const dependencyInstallStartedMs = Date.now();
+	const dependencyInstall = await sandbox.run({
+		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline`,
+	});
+	const dependencyInstallMs = Date.now() - dependencyInstallStartedMs;
+	if (dependencyInstall.exitCode !== 0)
+		throw new Error(
+			`Subject dependency install failed with exit ${dependencyInstall.exitCode}: ${bounded(dependencyInstall.stderr || dependencyInstall.stdout || "no command output", 20_000)}`,
+		);
+
+	const subjectCompileStartedMs = Date.now();
 	const subjectContract = await loadSubjectContract(ctx);
 	const preparedDependencyKey = subjectContract
 		? await dependencyKey(subjectContract, ctx)
@@ -73,6 +89,7 @@ export async function prepareSubject(
 	const compiledSubject = subjectContract
 		? await compileSubject(subjectContract, ctx)
 		: null;
+	const subjectCompileMs = Date.now() - subjectCompileStartedMs;
 
 	await sandbox.setNetworkPolicy("deny-all");
 
@@ -106,6 +123,7 @@ export async function prepareSubject(
 	const allowedTools = new Set(experiment.tools?.allow ?? []);
 	const tools = declaredTools.filter((tool) => allowedTools.has(tool.name));
 	const bootstrap = [] as Array<{ id: string; output: unknown }>;
+	const bootstrapStartedMs = Date.now();
 	for (const entry of experiment.tools?.bootstrap ?? []) {
 		const inputPath = `/workspace/.wind-tunnel-bootstrap-${bootstrap.length}.json`;
 		await sandbox.writeTextFile({
@@ -128,8 +146,16 @@ export async function prepareSubject(
 			bootstrap.push({ id: entry.id, output });
 		}
 	}
+	const bootstrapMs = Date.now() - bootstrapStartedMs;
 	const mutationPaths = mutationPathsFromBootstrap(bootstrap);
 	const preparedAt = new Date().toISOString();
+	const preparationTimings = {
+		sandboxAcquireMs,
+		sourceSetupMs,
+		dependencyInstallMs,
+		subjectCompileMs,
+		bootstrapMs,
+	};
 	const prepared = {
 		experimentPath,
 		task: bounded(task, 40_000),
@@ -144,6 +170,7 @@ export async function prepareSubject(
 		modelTimeoutMs: experiment.agent?.timeoutMs ?? 30_000,
 		preparationStartedAt,
 		preparationDurationMs: Date.now() - preparationStartedMs,
+		preparationTimings,
 		preparedAt,
 	};
 	preparedRun.update(() => prepared);

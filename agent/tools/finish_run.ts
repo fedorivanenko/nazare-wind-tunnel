@@ -117,7 +117,11 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	}
 
 	await mutationSandbox.delete();
+
+	const verificationSandboxAcquireStartedMs = Date.now();
 	const verificationSandbox = await ctx.getSandbox();
+	const verificationSandboxAcquireMs =
+		Date.now() - verificationSandboxAcquireStartedMs;
 	await verificationSandbox.setNetworkPolicy({ allow: ["registry.npmjs.org"] });
 	await verificationSandbox.writeBinaryFile({
 		path: "/workspace/source.tar.gz",
@@ -136,8 +140,8 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			content,
 		});
 
-	const verificationSetupStartedMs = Date.now();
-	const setup = await verificationSandbox.run({
+	const verificationSourceSetupStartedMs = Date.now();
+	const sourceSetup = await verificationSandbox.run({
 		command: [
 			"set -euo pipefail",
 			`rm -rf ${REPOSITORY_ROOT}`,
@@ -146,13 +150,24 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			`cd ${REPOSITORY_ROOT}`,
 			"test ! -s /workspace/candidate.patch || git apply --binary --whitespace=nowarn /workspace/candidate.patch",
 			"test -f pnpm-lock.yaml",
-			"pnpm install --frozen-lockfile --prefer-offline",
 		].join("\n"),
 	});
-	const verificationSetupDurationMs = Date.now() - verificationSetupStartedMs;
-	if (setup.exitCode !== 0)
+	const verificationSourceSetupMs =
+		Date.now() - verificationSourceSetupStartedMs;
+	if (sourceSetup.exitCode !== 0)
 		throw new Error(
-			`Fresh verification setup failed with exit ${setup.exitCode}: ${bounded(setup.stderr || setup.stdout, 20_000)}`,
+			`Fresh verification source setup failed with exit ${sourceSetup.exitCode}: ${bounded(sourceSetup.stderr || sourceSetup.stdout, 20_000)}`,
+		);
+
+	const verificationDependencyInstallStartedMs = Date.now();
+	const dependencyInstall = await verificationSandbox.run({
+		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline`,
+	});
+	const verificationDependencyInstallMs =
+		Date.now() - verificationDependencyInstallStartedMs;
+	if (dependencyInstall.exitCode !== 0)
+		throw new Error(
+			`Fresh verification dependency install failed with exit ${dependencyInstall.exitCode}: ${bounded(dependencyInstall.stderr || dependencyInstall.stdout, 20_000)}`,
 		);
 	await verificationSandbox.setNetworkPolicy("deny-all");
 
@@ -188,13 +203,18 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			? {
 					preparationStartedAt: prepared.preparationStartedAt,
 					preparationDurationMs: prepared.preparationDurationMs,
+					preparation: prepared.preparationTimings,
 					modelPhaseStartedAt: prepared.preparedAt,
 					modelPhaseEndedAt,
 					modelPhaseDurationMs:
 						Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
 					modelPhaseBudgetMs: prepared.modelTimeoutMs,
-					verificationSetupDurationMs,
-					verificationTierDurationsMs,
+					verification: {
+						sandboxAcquireMs: verificationSandboxAcquireMs,
+						sourceSetupMs: verificationSourceSetupMs,
+						dependencyInstallMs: verificationDependencyInstallMs,
+						tiersMs: verificationTierDurationsMs,
+					},
 				}
 			: null,
 		verificationIsolation: "fresh-sandbox",
