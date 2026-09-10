@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import type { ToolContext } from "eve/tools";
 import { resolveEvaluator } from "./evaluators";
-import { compileSubject, dependencyKey, loadSubjectContract } from "./prepared-subject";
+import {
+	compileSubject,
+	dependencyKey,
+	loadSubjectContract,
+} from "./prepared-subject";
 import { preparedRun } from "./run-state";
 import {
 	bounded,
@@ -78,7 +82,9 @@ export async function prepareSubject(
 				"Tool manifest",
 			)
 		: null;
-	const declaredTools = toolManifestText ? parseToolManifest(toolManifestText) : [];
+	const declaredTools = toolManifestText
+		? parseToolManifest(toolManifestText)
+		: [];
 	const allowedTools = new Set(experiment.tools?.allow ?? []);
 	const tools = declaredTools.filter((tool) => allowedTools.has(tool.name));
 	const bootstrap = [] as Array<{ id: string; output: unknown }>;
