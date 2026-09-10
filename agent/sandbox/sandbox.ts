@@ -1,10 +1,24 @@
 import { defineSandbox } from "eve/sandbox";
 import { vercel } from "eve/sandbox/vercel";
 
+const pnpmCacheDrive = process.env.WIND_TUNNEL_PNPM_CACHE_DRIVE?.trim();
+
 export default defineSandbox({
 	backend: vercel({
 		networkPolicy: { allow: ["registry.npmjs.org"] },
 		resources: { vcpus: 2 },
+		...(pnpmCacheDrive
+			? {
+					sessionCreateOptions: () => ({
+						mounts: {
+							"/workspace/.pnpm-store": {
+								drive: pnpmCacheDrive,
+								mode: "read-write" as const,
+							},
+						},
+					}),
+				}
+			: {}),
 	}),
 	revalidationKey: () => "nazare-wind-tunnel-eve-v1-pnpm-10.17.1",
 	async bootstrap({ use }) {
