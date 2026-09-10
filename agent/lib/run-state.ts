@@ -16,6 +16,14 @@ export type RuntimeTool = {
 	parameters: Record<string, RuntimeToolField>;
 };
 
+export type PreparationTimings = {
+	sandboxAcquireMs: number;
+	sourceSetupMs: number;
+	dependencyInstallMs: number;
+	subjectCompileMs: number;
+	bootstrapMs: number;
+};
+
 export type PreparedRun = {
 	experimentPath: string;
 	task: string;
@@ -33,6 +41,7 @@ export type PreparedRun = {
 	modelTimeoutMs: number;
 	preparationStartedAt: string;
 	preparationDurationMs: number;
+	preparationTimings: PreparationTimings;
 	preparedAt: string;
 };
 
