@@ -45,8 +45,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	);
 	const experiment = parseExperiment(experimentText);
 	const archiveLookup = await mutationSandbox.run({
-		command:
-			"find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
+		command: "find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
 	});
 	if (archiveLookup.exitCode !== 0 || !archiveLookup.stdout.trim())
 		throw new Error("Exact source archive is unavailable for verification");
@@ -56,7 +55,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	if (sourceArchive === null)
 		throw new Error("Exact source archive could not be read for verification");
 	const staged = await mutationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && find . -type d -name node_modules -prune -exec rm -rf {} + && git add -A && git diff --cached --binary --no-ext-diff`,
+		command: `cd ${REPOSITORY_ROOT} && git add -A && git diff --cached --binary --no-ext-diff`,
 	});
 	if (staged.exitCode !== 0)
 		throw new Error(
@@ -76,8 +75,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	const rawDiff = await mutationSandbox.run({
 		command: `cd ${REPOSITORY_ROOT} && git diff --cached --raw`,
 	});
-	if (rawDiff.exitCode !== 0)
-		throw new Error("Candidate mode inspection failed");
+	if (rawDiff.exitCode !== 0) throw new Error("Candidate mode inspection failed");
 	if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
 		throw new Error("Candidate patch may not create or modify symbolic links");
 	const forbidden = changedFiles.filter(protectedPath);
@@ -100,9 +98,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 
 	await mutationSandbox.delete();
 	const verificationSandbox = await ctx.getSandbox();
-	await verificationSandbox.setNetworkPolicy({
-		allow: ["registry.npmjs.org"],
-	});
+	await verificationSandbox.setNetworkPolicy({ allow: ["registry.npmjs.org"] });
 	await verificationSandbox.writeBinaryFile({
 		path: "/workspace/source.tar.gz",
 		content: sourceArchive,
@@ -112,14 +108,13 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		content: staged.stdout,
 	});
 	const evaluator = resolveEvaluator(experiment.evaluator);
-	await verificationSandbox.run({
-		command: "mkdir -p /workspace/evaluators",
-	});
+	await verificationSandbox.run({ command: "mkdir -p /workspace/evaluators" });
 	for (const [name, content] of Object.entries(evaluator.files))
 		await verificationSandbox.writeTextFile({
 			path: `/workspace/evaluators/${name}`,
 			content,
 		});
+	const verificationSetupStartedMs = Date.now();
 	const setup = await verificationSandbox.run({
 		command: [
 			"set -euo pipefail",
@@ -132,6 +127,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			"pnpm install --frozen-lockfile --prefer-offline",
 		].join("\n"),
 	});
+	const verificationSetupDurationMs = Date.now() - verificationSetupStartedMs;
 	if (setup.exitCode !== 0)
 		throw new Error(
 			`Fresh verification setup failed with exit ${setup.exitCode}: ${bounded(setup.stderr || setup.stdout, 20_000)}`,
@@ -164,10 +160,9 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			stderr: bounded(result.stderr, 20_000),
 			durationMs: Date.now() - checkStartedMs,
 		});
+		if (check.required && result.exitCode !== 0) break;
 	}
-	const passed = checks
-		.filter((check) => check.required)
-		.every((check) => check.passed);
+	const passed = checks.filter((check) => check.required).every((check) => check.passed);
 	await verificationSandbox.stop();
 	return {
 		passed,
@@ -181,9 +176,9 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 					preparationDurationMs: prepared.preparationDurationMs,
 					modelPhaseStartedAt: prepared.preparedAt,
 					modelPhaseEndedAt,
-					modelPhaseDurationMs:
-						Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
+					modelPhaseDurationMs: Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
 					modelPhaseBudgetMs: prepared.modelTimeoutMs,
+					verificationSetupDurationMs,
 				}
 			: null,
 		verificationIsolation: "fresh-sandbox",
@@ -191,8 +186,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 }
 
 export default defineTool({
-	description:
-		"Capture the candidate patch, rebuild it in a fresh sandbox, and run trusted experiment verification. Call exactly once after implementation.",
+	description: "Capture the candidate patch, rebuild it in a fresh sandbox, and run trusted experiment verification. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Verify candidate in fresh sandbox" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
