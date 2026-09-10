@@ -24,6 +24,13 @@ export type PreparationTimings = {
 	bootstrapMs: number;
 };
 
+export type MutationRange = {
+	file: string;
+	symbol: string;
+	startLine: number;
+	endLine: number;
+};
+
 export type PreparedRun = {
 	experimentPath: string;
 	task: string;
@@ -38,6 +45,7 @@ export type PreparedRun = {
 		stdout: string;
 	} | null;
 	mutationPaths: string[];
+	mutationRanges: MutationRange[];
 	modelTimeoutMs: number;
 	preparationStartedAt: string;
 	preparationDurationMs: number;
