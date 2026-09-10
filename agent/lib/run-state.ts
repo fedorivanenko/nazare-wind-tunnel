@@ -22,6 +22,8 @@ export type PreparedRun = {
 	bootstrap: Array<{ id: string; output: unknown }>;
 	tools: RuntimeTool[];
 	toolManifestSha256: string | null;
+	preparedDependencyKey: string | null;
+	compiledSubject: { outputPath: string; stdout: string } | null;
 	modelTimeoutMs: number;
 	preparationStartedAt: string;
 	preparationDurationMs: number;
