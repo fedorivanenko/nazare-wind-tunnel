@@ -199,6 +199,16 @@ export async function persistEvent(input: {
 	}
 }
 
+export async function failRun(sessionId: string, error: unknown) {
+	await initialize();
+	const database = sql();
+	await database`
+		update wind_tunnel_runs
+		set status='failed', error=${database.json(error as never)}, updated_at=now(), finished_at=now()
+		where session_id=${sessionId} and result is null
+	`;
+}
+
 export async function finishRun(sessionId: string, result: unknown) {
 	await initialize();
 	const database = sql();

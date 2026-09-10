@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { defineTool } from "eve/tools";
+import { defineTool, type ToolContext } from "eve/tools";
 import { z } from "zod";
 import { resolveEvaluator } from "../lib/evaluators";
 import { preparedRun } from "../lib/run-state";
@@ -33,169 +33,167 @@ function protectedPath(relativePath: string) {
 	);
 }
 
+export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
+	const modelPhaseEndedAt = new Date().toISOString();
+	const prepared = preparedRun.get();
+	const mutationSandbox = await ctx.getSandbox();
+	const experimentText = requiredText(
+		await mutationSandbox.readTextFile({
+			path: "/workspace/.wind-tunnel-experiment.json",
+		}),
+		"Prepared experiment",
+	);
+	const experiment = parseExperiment(experimentText);
+	const archiveLookup = await mutationSandbox.run({
+		command:
+			"find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
+	});
+	if (archiveLookup.exitCode !== 0 || !archiveLookup.stdout.trim())
+		throw new Error("Exact source archive is unavailable for verification");
+	const sourceArchive = await mutationSandbox.readBinaryFile({
+		path: archiveLookup.stdout.trim(),
+	});
+	if (sourceArchive === null)
+		throw new Error("Exact source archive could not be read for verification");
+	const staged = await mutationSandbox.run({
+		command: `cd ${REPOSITORY_ROOT} && find . -type d -name node_modules -prune -exec rm -rf {} + && git add -A && git diff --cached --binary --no-ext-diff`,
+	});
+	if (staged.exitCode !== 0)
+		throw new Error(
+			`Candidate capture failed: ${bounded(staged.stderr || staged.stdout, 20_000)}`,
+		);
+	const names = await mutationSandbox.run({
+		command: `cd ${REPOSITORY_ROOT} && git diff --cached --name-only`,
+	});
+	if (names.exitCode !== 0)
+		throw new Error(
+			`Changed-file capture failed: ${bounded(names.stderr || names.stdout, 20_000)}`,
+		);
+	const changedFiles = names.stdout
+		.split("\n")
+		.map((value) => value.trim())
+		.filter(Boolean);
+	const rawDiff = await mutationSandbox.run({
+		command: `cd ${REPOSITORY_ROOT} && git diff --cached --raw`,
+	});
+	if (rawDiff.exitCode !== 0)
+		throw new Error("Candidate mode inspection failed");
+	if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
+		throw new Error("Candidate patch may not create or modify symbolic links");
+	const forbidden = changedFiles.filter(protectedPath);
+	if (forbidden.length)
+		throw new Error(
+			`Candidate patch modifies protected or generated paths: ${forbidden.join(", ")}`,
+		);
+	if (experiment.allowedPaths?.length) {
+		const outsideAllowedPaths = changedFiles.filter(
+			(file) =>
+				!experiment.allowedPaths?.some(
+					(prefix) => file === prefix || file.startsWith(`${prefix}/`),
+				),
+		);
+		if (outsideAllowedPaths.length)
+			throw new Error(
+				`Candidate patch modifies paths outside allowedPaths: ${outsideAllowedPaths.join(", ")}`,
+			);
+	}
+
+	await mutationSandbox.delete();
+	const verificationSandbox = await ctx.getSandbox();
+	await verificationSandbox.setNetworkPolicy({
+		allow: ["registry.npmjs.org"],
+	});
+	await verificationSandbox.writeBinaryFile({
+		path: "/workspace/source.tar.gz",
+		content: sourceArchive,
+	});
+	await verificationSandbox.writeTextFile({
+		path: "/workspace/candidate.patch",
+		content: staged.stdout,
+	});
+	const evaluator = resolveEvaluator(experiment.evaluator);
+	await verificationSandbox.run({
+		command: "mkdir -p /workspace/evaluators",
+	});
+	for (const [name, content] of Object.entries(evaluator.files))
+		await verificationSandbox.writeTextFile({
+			path: `/workspace/evaluators/${name}`,
+			content,
+		});
+	const setup = await verificationSandbox.run({
+		command: [
+			"set -euo pipefail",
+			`rm -rf ${REPOSITORY_ROOT}`,
+			`mkdir -p ${REPOSITORY_ROOT}`,
+			`tar -xzf /workspace/source.tar.gz -C ${REPOSITORY_ROOT}`,
+			`cd ${REPOSITORY_ROOT}`,
+			"test ! -s /workspace/candidate.patch || git apply --binary --whitespace=nowarn /workspace/candidate.patch",
+			"test -f pnpm-lock.yaml",
+			"pnpm install --frozen-lockfile --prefer-offline",
+		].join("\n"),
+	});
+	if (setup.exitCode !== 0)
+		throw new Error(
+			`Fresh verification setup failed with exit ${setup.exitCode}: ${bounded(setup.stderr || setup.stdout, 20_000)}`,
+		);
+	await verificationSandbox.setNetworkPolicy("deny-all");
+
+	const checks = [] as Array<{
+		name: string;
+		command: string;
+		required: boolean;
+		passed: boolean;
+		exitCode: number;
+		stdout: string;
+		stderr: string;
+		durationMs: number;
+	}>;
+	for (const check of evaluator.checks) {
+		const seconds = Math.max(1, Math.ceil(check.timeoutMs / 1_000));
+		const checkStartedMs = Date.now();
+		const result = await verificationSandbox.run({
+			command: `cd ${REPOSITORY_ROOT} && timeout ${seconds}s bash -lc ${shellQuote(check.command)}`,
+		});
+		checks.push({
+			name: check.name,
+			command: check.command,
+			required: check.required,
+			passed: result.exitCode === 0,
+			exitCode: result.exitCode,
+			stdout: bounded(result.stdout, 20_000),
+			stderr: bounded(result.stderr, 20_000),
+			durationMs: Date.now() - checkStartedMs,
+		});
+	}
+	const passed = checks
+		.filter((check) => check.required)
+		.every((check) => check.passed);
+	await verificationSandbox.stop();
+	return {
+		passed,
+		changedFiles,
+		checks,
+		patch: bounded(staged.stdout),
+		patchSha256: createHash("sha256").update(staged.stdout).digest("hex"),
+		timings: prepared
+			? {
+					preparationStartedAt: prepared.preparationStartedAt,
+					preparationDurationMs: prepared.preparationDurationMs,
+					modelPhaseStartedAt: prepared.preparedAt,
+					modelPhaseEndedAt,
+					modelPhaseDurationMs:
+						Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
+					modelPhaseBudgetMs: prepared.modelTimeoutMs,
+				}
+			: null,
+		verificationIsolation: "fresh-sandbox",
+	};
+}
+
 export default defineTool({
 	description:
 		"Capture the candidate patch, rebuild it in a fresh sandbox, and run trusted experiment verification. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Verify candidate in fresh sandbox" },
-	async execute(_input, ctx) {
-		const modelPhaseEndedAt = new Date().toISOString();
-		const prepared = preparedRun.get();
-		const mutationSandbox = await ctx.getSandbox();
-		const experimentText = requiredText(
-			await mutationSandbox.readTextFile({
-				path: "/workspace/.wind-tunnel-experiment.json",
-			}),
-			"Prepared experiment",
-		);
-		const experiment = parseExperiment(experimentText);
-		const archiveLookup = await mutationSandbox.run({
-			command:
-				"find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
-		});
-		if (archiveLookup.exitCode !== 0 || !archiveLookup.stdout.trim())
-			throw new Error("Exact source archive is unavailable for verification");
-		const sourceArchive = await mutationSandbox.readBinaryFile({
-			path: archiveLookup.stdout.trim(),
-		});
-		if (sourceArchive === null)
-			throw new Error(
-				"Exact source archive could not be read for verification",
-			);
-		const staged = await mutationSandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && find . -type d -name node_modules -prune -exec rm -rf {} + && git add -A && git diff --cached --binary --no-ext-diff`,
-		});
-		if (staged.exitCode !== 0)
-			throw new Error(
-				`Candidate capture failed: ${bounded(staged.stderr || staged.stdout, 20_000)}`,
-			);
-		const names = await mutationSandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && git diff --cached --name-only`,
-		});
-		if (names.exitCode !== 0)
-			throw new Error(
-				`Changed-file capture failed: ${bounded(names.stderr || names.stdout, 20_000)}`,
-			);
-		const changedFiles = names.stdout
-			.split("\n")
-			.map((value) => value.trim())
-			.filter(Boolean);
-		const rawDiff = await mutationSandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && git diff --cached --raw`,
-		});
-		if (rawDiff.exitCode !== 0)
-			throw new Error("Candidate mode inspection failed");
-		if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
-			throw new Error(
-				"Candidate patch may not create or modify symbolic links",
-			);
-		const forbidden = changedFiles.filter(protectedPath);
-		if (forbidden.length)
-			throw new Error(
-				`Candidate patch modifies protected or generated paths: ${forbidden.join(", ")}`,
-			);
-		if (experiment.allowedPaths?.length) {
-			const outsideAllowedPaths = changedFiles.filter(
-				(file) =>
-					!experiment.allowedPaths?.some(
-						(prefix) => file === prefix || file.startsWith(`${prefix}/`),
-					),
-			);
-			if (outsideAllowedPaths.length)
-				throw new Error(
-					`Candidate patch modifies paths outside allowedPaths: ${outsideAllowedPaths.join(", ")}`,
-				);
-		}
-
-		await mutationSandbox.delete();
-		const verificationSandbox = await ctx.getSandbox();
-		await verificationSandbox.setNetworkPolicy({
-			allow: ["registry.npmjs.org"],
-		});
-		await verificationSandbox.writeBinaryFile({
-			path: "/workspace/source.tar.gz",
-			content: sourceArchive,
-		});
-		await verificationSandbox.writeTextFile({
-			path: "/workspace/candidate.patch",
-			content: staged.stdout,
-		});
-		const evaluator = resolveEvaluator(experiment.evaluator);
-		await verificationSandbox.run({
-			command: "mkdir -p /workspace/evaluators",
-		});
-		for (const [name, content] of Object.entries(evaluator.files))
-			await verificationSandbox.writeTextFile({
-				path: `/workspace/evaluators/${name}`,
-				content,
-			});
-		const setup = await verificationSandbox.run({
-			command: [
-				"set -euo pipefail",
-				`rm -rf ${REPOSITORY_ROOT}`,
-				`mkdir -p ${REPOSITORY_ROOT}`,
-				`tar -xzf /workspace/source.tar.gz -C ${REPOSITORY_ROOT}`,
-				`cd ${REPOSITORY_ROOT}`,
-				"test ! -s /workspace/candidate.patch || git apply --binary --whitespace=nowarn /workspace/candidate.patch",
-				"test -f pnpm-lock.yaml",
-				"pnpm install --frozen-lockfile --prefer-offline",
-			].join("\n"),
-		});
-		if (setup.exitCode !== 0)
-			throw new Error(
-				`Fresh verification setup failed with exit ${setup.exitCode}: ${bounded(setup.stderr || setup.stdout, 20_000)}`,
-			);
-		await verificationSandbox.setNetworkPolicy("deny-all");
-
-		const checks = [] as Array<{
-			name: string;
-			command: string;
-			required: boolean;
-			passed: boolean;
-			exitCode: number;
-			stdout: string;
-			stderr: string;
-			durationMs: number;
-		}>;
-		for (const check of evaluator.checks) {
-			const seconds = Math.max(1, Math.ceil(check.timeoutMs / 1_000));
-			const checkStartedMs = Date.now();
-			const result = await verificationSandbox.run({
-				command: `cd ${REPOSITORY_ROOT} && timeout ${seconds}s bash -lc ${shellQuote(check.command)}`,
-			});
-			checks.push({
-				name: check.name,
-				command: check.command,
-				required: check.required,
-				passed: result.exitCode === 0,
-				exitCode: result.exitCode,
-				stdout: bounded(result.stdout, 20_000),
-				stderr: bounded(result.stderr, 20_000),
-				durationMs: Date.now() - checkStartedMs,
-			});
-		}
-		const passed = checks
-			.filter((check) => check.required)
-			.every((check) => check.passed);
-		await verificationSandbox.stop();
-		return {
-			passed,
-			changedFiles,
-			checks,
-			patch: bounded(staged.stdout),
-			patchSha256: createHash("sha256").update(staged.stdout).digest("hex"),
-			timings: prepared
-				? {
-						preparationStartedAt: prepared.preparationStartedAt,
-						preparationDurationMs: prepared.preparationDurationMs,
-						modelPhaseStartedAt: prepared.preparedAt,
-						modelPhaseEndedAt,
-						modelPhaseDurationMs:
-							Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
-						modelPhaseBudgetMs: prepared.modelTimeoutMs,
-					}
-				: null,
-			verificationIsolation: "fresh-sandbox",
-		};
-	},
+	execute: (_input, ctx) => finalizeCandidate(ctx),
 });

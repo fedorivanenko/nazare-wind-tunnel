@@ -8,6 +8,48 @@ const SETTLED = new Set([
 	"session.completed",
 ]);
 
+async function includeAutomaticFinalization(id: string, events: EveEvent[]) {
+	if (
+		events.some(
+			(event) =>
+				event.type === "action.result" &&
+				(event.data?.result as { toolName?: unknown } | undefined)?.toolName ===
+					"finish_run",
+		)
+	)
+		return events;
+	const response = await eveFetch(`/api/runs/${id}`);
+	if (!response.ok) return events;
+	const payload = (await response.json()) as {
+		run?: { result?: unknown; updatedAt?: string };
+	};
+	if (payload.run?.result == null) return events;
+	return [
+		...events,
+		{
+			type: "action.result",
+			meta: {
+				id: `automatic-finalization-${id}`,
+				at: payload.run.updatedAt,
+			},
+			data: {
+				result: {
+					kind: "tool-result",
+					toolName: "finish_run",
+					output: payload.run.result,
+				},
+			},
+		},
+	];
+}
+
+async function sessionResponse(id: string, events: EveEvent[]) {
+	return Response.json(
+		{ sessionId: id, events: await includeAutomaticFinalization(id, events) },
+		{ headers: { "cache-control": "no-store" } },
+	);
+}
+
 function redact(event: EveEvent): EveEvent {
 	if (event.type !== "message.received") return event;
 	const data = structuredClone(event.data ?? {});
@@ -62,10 +104,7 @@ export const GET: APIRoute = async ({ params }) => {
 					events.push(event);
 					if (SETTLED.has(event.type)) {
 						await reader.cancel();
-						return Response.json(
-							{ sessionId: id, events },
-							{ headers: { "cache-control": "no-store" } },
-						);
+						return sessionResponse(id, events);
 					}
 				} catch {
 					// Ignore malformed or partial durable-stream lines.
@@ -77,10 +116,7 @@ export const GET: APIRoute = async ({ params }) => {
 	} finally {
 		clearTimeout(timer);
 	}
-	return Response.json(
-		{ sessionId: id, events },
-		{ headers: { "cache-control": "no-store" } },
-	);
+	return sessionResponse(id, events);
 };
 
 export const DELETE: APIRoute = async ({ params }) => {
