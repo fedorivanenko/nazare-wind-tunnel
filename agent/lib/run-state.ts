@@ -29,6 +29,7 @@ export type PreparedRun = {
 		bytes: number;
 		stdout: string;
 	} | null;
+	mutationPaths: string[];
 	modelTimeoutMs: number;
 	preparationStartedAt: string;
 	preparationDurationMs: number;
