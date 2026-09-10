@@ -8,8 +8,8 @@ import {
 	parseExperiment,
 	REPOSITORY_ROOT,
 	requiredText,
-	shellQuote,
 } from "../lib/subject";
+import { runVerificationPlan } from "../lib/verification-plan";
 
 const PROTECTED_PATHS = [".git", ".wind-tunnel", "experiments", ".github"];
 const GENERATED_SEGMENTS = new Set([
@@ -54,6 +54,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	});
 	if (sourceArchive === null)
 		throw new Error("Exact source archive could not be read for verification");
+
 	const staged = await mutationSandbox.run({
 		command: `cd ${REPOSITORY_ROOT} && git add -A && git diff --cached --binary --no-ext-diff`,
 	});
@@ -78,6 +79,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	if (rawDiff.exitCode !== 0) throw new Error("Candidate mode inspection failed");
 	if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
 		throw new Error("Candidate patch may not create or modify symbolic links");
+
 	const forbidden = changedFiles.filter(protectedPath);
 	if (forbidden.length)
 		throw new Error(
@@ -107,6 +109,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		path: "/workspace/candidate.patch",
 		content: staged.stdout,
 	});
+
 	const evaluator = resolveEvaluator(experiment.evaluator);
 	await verificationSandbox.run({ command: "mkdir -p /workspace/evaluators" });
 	for (const [name, content] of Object.entries(evaluator.files))
@@ -114,6 +117,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			path: `/workspace/evaluators/${name}`,
 			content,
 		});
+
 	const verificationSetupStartedMs = Date.now();
 	const setup = await verificationSandbox.run({
 		command: [
@@ -134,51 +138,39 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		);
 	await verificationSandbox.setNetworkPolicy("deny-all");
 
-	const checks = [] as Array<{
-		name: string;
-		command: string;
-		required: boolean;
-		passed: boolean;
-		exitCode: number;
-		stdout: string;
-		stderr: string;
-		durationMs: number;
-	}>;
-	for (const check of evaluator.checks) {
-		const seconds = Math.max(1, Math.ceil(check.timeoutMs / 1_000));
-		const checkStartedMs = Date.now();
-		const result = await verificationSandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && timeout ${seconds}s bash -lc ${shellQuote(check.command)}`,
-		});
-		checks.push({
-			name: check.name,
-			command: check.command,
-			required: check.required,
-			passed: result.exitCode === 0,
-			exitCode: result.exitCode,
-			stdout: bounded(result.stdout, 20_000),
-			stderr: bounded(result.stderr, 20_000),
-			durationMs: Date.now() - checkStartedMs,
-		});
-		if (check.required && result.exitCode !== 0) break;
-	}
-	const passed = checks.filter((check) => check.required).every((check) => check.passed);
+	const checks = await runVerificationPlan(evaluator.checks, ctx);
+	const passed = checks
+		.filter((check) => check.required)
+		.every((check) => check.passed);
 	await verificationSandbox.stop();
+
+	const verificationTierDurationsMs = checks.reduce<Record<string, number>>(
+		(totals, check) => {
+			const tier = check.tier ?? "behavioral";
+			totals[tier] = (totals[tier] ?? 0) + check.durationMs;
+			return totals;
+		},
+		{},
+	);
+
 	return {
 		passed,
 		changedFiles,
 		checks,
 		patch: bounded(staged.stdout),
 		patchSha256: createHash("sha256").update(staged.stdout).digest("hex"),
+		preparedDependencyKey: prepared?.preparedDependencyKey ?? null,
 		timings: prepared
 			? {
 					preparationStartedAt: prepared.preparationStartedAt,
 					preparationDurationMs: prepared.preparationDurationMs,
 					modelPhaseStartedAt: prepared.preparedAt,
 					modelPhaseEndedAt,
-					modelPhaseDurationMs: Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
+					modelPhaseDurationMs:
+						Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
 					modelPhaseBudgetMs: prepared.modelTimeoutMs,
 					verificationSetupDurationMs,
+					verificationTierDurationsMs,
 				}
 			: null,
 		verificationIsolation: "fresh-sandbox",
@@ -186,7 +178,8 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 }
 
 export default defineTool({
-	description: "Capture the candidate patch, rebuild it in a fresh sandbox, and run trusted experiment verification. Call exactly once after implementation.",
+	description:
+		"Capture the candidate patch, rebuild it in a fresh sandbox, and run trusted progressive verification. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Verify candidate in fresh sandbox" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
