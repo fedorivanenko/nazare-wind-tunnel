@@ -17,9 +17,7 @@ export function parseUnifiedZeroDiff(diff: string) {
 			continue;
 		}
 		if (!file || !line.startsWith("@@ ")) continue;
-		const match = line.match(
-			/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/,
-		);
+		const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
 		if (!match) continue;
 		hunks.push({
 			file,
