@@ -1,10 +1,13 @@
 import marketingConsentV2Source from "./marketing-consent-v2.source";
 
+export type VerificationTier = "structural" | "focused" | "behavioral" | "full";
+
 export type EvaluatorCheck = {
 	name: string;
 	command: string;
 	timeoutMs: number;
 	required: boolean;
+	tier?: VerificationTier;
 };
 
 export type EvaluatorDefinition = {
@@ -21,6 +24,7 @@ const evaluators: Record<string, EvaluatorDefinition> = {
 				command: 'node -e "process.exit(0)"',
 				timeoutMs: 5_000,
 				required: true,
+				tier: "structural",
 			},
 		],
 	},
@@ -33,34 +37,39 @@ const evaluators: Record<string, EvaluatorDefinition> = {
 		},
 		checks: [
 			{
-				name: "task-oracle",
-				command: "pnpm exec tsx /workspace/evaluators/marketing-consent-v2.ts",
-				timeoutMs: 30_000,
-				required: true,
-			},
-			{
 				name: "lint",
 				command: "pnpm lint",
 				timeoutMs: 120_000,
 				required: true,
+				tier: "structural",
 			},
 			{
 				name: "test",
 				command: "pnpm test",
 				timeoutMs: 120_000,
 				required: true,
+				tier: "focused",
+			},
+			{
+				name: "task-oracle",
+				command: "pnpm exec tsx /workspace/evaluators/marketing-consent-v2.ts",
+				timeoutMs: 30_000,
+				required: true,
+				tier: "behavioral",
 			},
 			{
 				name: "typecheck",
 				command: "pnpm typecheck",
 				timeoutMs: 120_000,
 				required: true,
+				tier: "full",
 			},
 			{
 				name: "build",
 				command: "pnpm build",
 				timeoutMs: 180_000,
 				required: true,
+				tier: "full",
 			},
 		],
 	},
