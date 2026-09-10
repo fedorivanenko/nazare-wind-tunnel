@@ -210,15 +210,16 @@ export async function materializeSubject(repository:string,githubSha:string,runI
 
 export async function captureSubjectChanges(repository:string,githubSha:string,runId:string,observer?:SubjectProcessObserver){
   const trustedCwd=subjectPath(repository);const cwd=runSubjectPath(runId);await mkdir(INDEX_ROOT,{recursive:true});
-  const indexPath=path.join(INDEX_ROOT,`${runId}.index`);await rm(indexPath,{force:true});
+  const indexPath=path.join(INDEX_ROOT,`${runId}.index`);const dependencies=path.join(cwd,'node_modules');await rm(indexPath,{force:true});
   const env=subjectRuntimeEnv({GIT_DIR:path.join(trustedCwd,'.git'),GIT_WORK_TREE:cwd,GIT_INDEX_FILE:indexPath});
+  await rm(dependencies,{force:true});
   try{
     await must(await runSubjectProcess('git',['read-tree',githubSha],cwd,30_000,observer,{env}),'git read-tree');
-    await must(await runSubjectProcess('git',['add','-A','--','.',':(exclude)node_modules'],cwd,60_000,observer,{env}),'git add candidate');
+    await must(await runSubjectProcess('git',['add','-A','--','.'],cwd,60_000,observer,{env}),'git add candidate');
     const patch=await must(await runSubjectProcess('git',['diff','--cached','--no-ext-diff','--binary',githubSha,'--','.'],cwd,60_000,observer,{env}),'git diff candidate');
     const changed=await must(await runSubjectProcess('git',['diff','--cached','--name-only',githubSha,'--','.'],cwd,60_000,observer,{env}),'git changed files');
     return {patch:patch.stdout,changedFiles:changed.stdout};
-  }finally{await rm(indexPath,{force:true});}
+  }finally{await rm(indexPath,{force:true});if(!existsSync(dependencies))await symlink(path.join(trustedCwd,'node_modules'),dependencies,'dir');}
 }
 
 export async function cleanRunSubject(runId:string){await rm(path.dirname(runSubjectPath(runId)),{recursive:true,force:true});}
