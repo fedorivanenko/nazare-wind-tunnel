@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ToolContext } from "eve/tools";
 import { resolveEvaluator } from "./evaluators";
+import { compileSubject, dependencyKey, loadSubjectContract } from "./prepared-subject";
 import { preparedRun } from "./run-state";
 import {
 	bounded,
@@ -42,6 +43,15 @@ export async function prepareSubject(
 		throw new Error(
 			`Subject preparation failed with exit ${prepare.exitCode}: ${bounded(prepare.stderr || prepare.stdout || "no command output", 20_000)}`,
 		);
+
+	const subjectContract = await loadSubjectContract(ctx);
+	const preparedDependencyKey = subjectContract
+		? await dependencyKey(subjectContract, ctx)
+		: null;
+	const compiledSubject = subjectContract
+		? await compileSubject(subjectContract, ctx)
+		: null;
+
 	await sandbox.setNetworkPolicy("deny-all");
 
 	const experimentText = requiredText(
@@ -68,9 +78,7 @@ export async function prepareSubject(
 				"Tool manifest",
 			)
 		: null;
-	const declaredTools = toolManifestText
-		? parseToolManifest(toolManifestText)
-		: [];
+	const declaredTools = toolManifestText ? parseToolManifest(toolManifestText) : [];
 	const allowedTools = new Set(experiment.tools?.allow ?? []);
 	const tools = declaredTools.filter((tool) => allowedTools.has(tool.name));
 	const bootstrap = [] as Array<{ id: string; output: unknown }>;
@@ -105,6 +113,8 @@ export async function prepareSubject(
 		toolManifestSha256: toolManifestText
 			? createHash("sha256").update(toolManifestText).digest("hex")
 			: null,
+		preparedDependencyKey,
+		compiledSubject,
 		modelTimeoutMs: experiment.agent?.timeoutMs ?? 30_000,
 		preparationStartedAt,
 		preparationDurationMs: Date.now() - preparationStartedMs,
