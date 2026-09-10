@@ -7,6 +7,10 @@ export default defineHook({
 			if (!process.env.DATABASE_URL || !ctx || !event.meta.id) return;
 			await persistEvent({
 				id: event.meta.id,
+				runId:
+					typeof ctx.session.auth.initiator?.attributes.runId === "string"
+						? ctx.session.auth.initiator.attributes.runId
+						: undefined,
 				sessionId: ctx.session.id,
 				type: event.type,
 				data: "data" in event ? event.data : null,

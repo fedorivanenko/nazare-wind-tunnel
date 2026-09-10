@@ -22,6 +22,7 @@ export type PreparedRun = {
 	bootstrap: Array<{ id: string; output: unknown }>;
 	tools: RuntimeTool[];
 	toolManifestSha256: string | null;
+	modelTimeoutMs: number;
 	preparedAt: string;
 };
 
@@ -29,3 +30,14 @@ export const preparedRun = defineState<PreparedRun | null>(
 	"nazare-wind-tunnel.prepared-run-v1",
 	() => null,
 );
+
+export function requireModelBudget() {
+	const prepared = preparedRun.get();
+	if (!prepared) throw new Error("Subject preparation is incomplete");
+	const deadline = Date.parse(prepared.preparedAt) + prepared.modelTimeoutMs;
+	if (Date.now() > deadline)
+		throw new Error(
+			`Model phase exceeded ${prepared.modelTimeoutMs}ms post-preparation budget`,
+		);
+	return prepared;
+}

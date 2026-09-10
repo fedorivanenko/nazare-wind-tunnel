@@ -105,7 +105,13 @@ export async function createRun(input: {
 
 export async function attachSession(runId: string, sessionId: string) {
 	await initialize();
-	await sql()`update wind_tunnel_runs set session_id=${sessionId}, status='preparing', updated_at=now() where id=${runId}`;
+	await sql()`
+		update wind_tunnel_runs
+		set session_id=coalesce(session_id, ${sessionId}),
+			status=case when status='accepted' then 'preparing' else status end,
+			updated_at=now()
+		where id=${runId} and (session_id is null or session_id=${sessionId})
+	`;
 }
 
 export async function listRuns(limit = 50) {
@@ -133,6 +139,7 @@ export async function getRunEvents(runId: string, limit = 2_000) {
 
 export async function persistEvent(input: {
 	id: string;
+	runId?: string;
 	sessionId: string;
 	type: string;
 	data: unknown;
@@ -140,6 +147,12 @@ export async function persistEvent(input: {
 }) {
 	await initialize();
 	const database = sql();
+	if (input.runId)
+		await database`
+			update wind_tunnel_runs
+			set session_id=coalesce(session_id, ${input.sessionId}), updated_at=now()
+			where id=${input.runId} and (session_id is null or session_id=${input.sessionId})
+		`;
 	await database`
 		insert into wind_tunnel_events (id, run_id, session_id, type, data, emitted_at)
 		select ${input.id}, id, ${input.sessionId}, ${input.type}, ${database.json((input.data ?? null) as never)}, ${input.at}

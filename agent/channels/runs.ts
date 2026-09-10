@@ -111,7 +111,7 @@ export default defineChannel<RunChannelState>({
 				[
 					{
 						type: "text",
-						text: `Implement Wind Tunnel experiment ${input.experimentPath} for ${input.repository} at exact source SHA ${input.sourceSha}. First call prepare_subject with this experiment path. After implementation call finish_run exactly once.`,
+						text: `Execute prepared Wind Tunnel experiment ${input.experimentPath} for ${input.repository} at exact source SHA ${input.sourceSha}. Implement immediately, then call finish_run exactly once.`,
 					},
 					{
 						type: "file",
@@ -125,7 +125,12 @@ export default defineChannel<RunChannelState>({
 						authenticator: "wind-tunnel-token",
 						principalId: "github-actions",
 						principalType: "service",
-						attributes: {},
+						attributes: {
+							runId: run.id,
+							experimentPath: input.experimentPath,
+							repository: input.repository,
+							sourceSha: input.sourceSha,
+						},
 					},
 					state: {
 						runId: run.id,

@@ -38,6 +38,8 @@ export function bounded(text: string, maxBytes = MAX_TEXT_BYTES) {
 export type ExperimentDefinition = {
 	taskFile: string;
 	evaluator?: string;
+	agent?: { timeoutMs?: number };
+	allowedPaths?: string[];
 	tools?: {
 		manifest?: string;
 		allow?: string[];
@@ -59,6 +61,15 @@ export function parseExperiment(text: string): ExperimentDefinition {
 	const value = JSON.parse(text) as ExperimentDefinition;
 	if (typeof value.taskFile !== "string" || !value.taskFile)
 		throw new Error("Experiment taskFile missing");
+	if (
+		value.allowedPaths !== undefined &&
+		(!Array.isArray(value.allowedPaths) ||
+			value.allowedPaths.some((entry) => typeof entry !== "string" || !entry))
+	)
+		throw new Error(
+			"Experiment allowedPaths must contain repository-relative paths",
+		);
+	for (const entry of value.allowedPaths ?? []) safeRepositoryPath(entry);
 	return value;
 }
 

@@ -33,10 +33,10 @@ GitHub Action checks out exact candidate SHA and uploads `source.tar.gz` as eve 
 
 Inside sandbox:
 
-1. `prepare_subject` extracts archive into `/workspace/repo`.
+1. A preflight hook extracts archive into `/workspace/repo` before model execution.
 2. It initializes credential-free local Git baseline.
 3. It installs dependencies with pinned pnpm `10.17.1`.
-4. Network changes to `deny-all` before subject bootstrap/model shell execution.
+4. Network changes to `deny-all` before subject bootstrap/model execution.
 5. Target-owned tool manifests are validated and exposed dynamically by eve.
 6. Agent mutates candidate.
 7. `finish_run` captures the binary patch and destroys the mutation sandbox.
@@ -59,12 +59,12 @@ pnpm 10.17.1
 Model-facing tools:
 
 ```text
-prepare_subject
 bash
 read_file
 write_file
 grep
 finish_run
+[target-manifest tools]
 ```
 
 Agent definition lives under `agent/`:
@@ -73,20 +73,24 @@ Agent definition lives under `agent/`:
 agent/
   agent.ts
   instructions.md
-  sandbox.ts
-  channels/eve.ts
-  lib/subject.ts
+  sandbox/sandbox.ts
+  channels/
+  hooks/
+  instructions/
+  lib/
   tools/
 ```
 
 ## Experiment contract
 
-Subject repository owns experiment and task files. Existing experiment JSON remains valid for source preparation, deterministic bootstrap, and verification:
+Subject repository owns task, preparation, and model-assistance tools. Wind Tunnel owns versioned trusted evaluators:
 
 ```json
 {
   "id": "marketing-consent-02",
   "taskFile": "experiments/luna-operability/task-02-marketing-consent.md",
+  "evaluator": "marketing-consent-v2",
+  "allowedPaths": ["app"],
   "agent": {
     "provider": "vercel-ai-gateway",
     "model": "openai/gpt-oss-120b",
@@ -101,10 +105,7 @@ Subject repository owns experiment and task files. Existing experiment JSON rema
       "maxOutputBytes": 24000,
       "required": true
     }]
-  },
-  "verification": [
-    {"name":"task-oracle","command":"pnpm exec tsx .wind-tunnel/verify-marketing-consent.ts","required":true}
-  ]
+  }
 }
 ```
 

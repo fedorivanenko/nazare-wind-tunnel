@@ -4,6 +4,7 @@ import {
 	preparedRun,
 	type RuntimeTool,
 	type RuntimeToolField,
+	requireModelBudget,
 } from "../lib/run-state";
 import {
 	bounded,
@@ -47,6 +48,7 @@ export default defineDynamic({
 						inputSchema: inputSchema(tool),
 						label: { start: () => tool.name },
 						async execute(input, ctx) {
+							requireModelBudget();
 							const sandbox = await ctx.getSandbox();
 							const inputPath = `/workspace/.wind-tunnel-tool-${crypto.randomUUID()}.json`;
 							await sandbox.writeTextFile({

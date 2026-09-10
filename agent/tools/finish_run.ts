@@ -11,11 +11,24 @@ import {
 } from "../lib/subject";
 
 const PROTECTED_PATHS = [".git", ".wind-tunnel", "experiments", ".github"];
+const GENERATED_SEGMENTS = new Set([
+	"node_modules",
+	"dist",
+	"build",
+	"coverage",
+	".cache",
+	".astro",
+	".next",
+	".output",
+]);
 
 function protectedPath(relativePath: string) {
-	return PROTECTED_PATHS.some(
-		(prefix) =>
-			relativePath === prefix || relativePath.startsWith(`${prefix}/`),
+	const segments = relativePath.split("/");
+	return (
+		PROTECTED_PATHS.some(
+			(prefix) =>
+				relativePath === prefix || relativePath.startsWith(`${prefix}/`),
+		) || segments.some((segment) => GENERATED_SEGMENTS.has(segment))
 	);
 }
 
@@ -47,7 +60,7 @@ export default defineTool({
 				"Exact source archive could not be read for verification",
 			);
 		const staged = await mutationSandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && git add -A -- . ':(exclude)node_modules' ':(exclude)**/node_modules/**' && git diff --cached --binary --no-ext-diff`,
+			command: `cd ${REPOSITORY_ROOT} && find . -type d -name node_modules -prune -exec rm -rf {} + && git add -A && git diff --cached --binary --no-ext-diff`,
 		});
 		if (staged.exitCode !== 0)
 			throw new Error(
@@ -64,11 +77,32 @@ export default defineTool({
 			.split("\n")
 			.map((value) => value.trim())
 			.filter(Boolean);
+		const rawDiff = await mutationSandbox.run({
+			command: `cd ${REPOSITORY_ROOT} && git diff --cached --raw`,
+		});
+		if (rawDiff.exitCode !== 0)
+			throw new Error("Candidate mode inspection failed");
+		if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
+			throw new Error(
+				"Candidate patch may not create or modify symbolic links",
+			);
 		const forbidden = changedFiles.filter(protectedPath);
 		if (forbidden.length)
 			throw new Error(
-				`Candidate patch modifies protected harness paths: ${forbidden.join(", ")}`,
+				`Candidate patch modifies protected or generated paths: ${forbidden.join(", ")}`,
 			);
+		if (experiment.allowedPaths?.length) {
+			const outsideAllowedPaths = changedFiles.filter(
+				(file) =>
+					!experiment.allowedPaths?.some(
+						(prefix) => file === prefix || file.startsWith(`${prefix}/`),
+					),
+			);
+			if (outsideAllowedPaths.length)
+				throw new Error(
+					`Candidate patch modifies paths outside allowedPaths: ${outsideAllowedPaths.join(", ")}`,
+				);
+		}
 
 		await mutationSandbox.delete();
 		const verificationSandbox = await ctx.getSandbox();
@@ -83,6 +117,15 @@ export default defineTool({
 			path: "/workspace/candidate.patch",
 			content: staged.stdout,
 		});
+		const evaluator = resolveEvaluator(experiment.evaluator);
+		await verificationSandbox.run({
+			command: "mkdir -p /workspace/evaluators",
+		});
+		for (const [name, content] of Object.entries(evaluator.files))
+			await verificationSandbox.writeTextFile({
+				path: `/workspace/evaluators/${name}`,
+				content,
+			});
 		const setup = await verificationSandbox.run({
 			command: [
 				"set -euo pipefail",
@@ -110,7 +153,7 @@ export default defineTool({
 			stdout: string;
 			stderr: string;
 		}>;
-		for (const check of resolveEvaluator(experiment.evaluator)) {
+		for (const check of evaluator.checks) {
 			const seconds = Math.max(1, Math.ceil(check.timeoutMs / 1_000));
 			const result = await verificationSandbox.run({
 				command: `cd ${REPOSITORY_ROOT} && timeout ${seconds}s bash -lc ${shellQuote(check.command)}`,
