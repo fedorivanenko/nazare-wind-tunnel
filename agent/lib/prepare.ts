@@ -201,6 +201,7 @@ export async function prepareSubject(
 		mutationPaths: mutationContract.paths,
 		mutationRanges: mutationContract.ranges,
 		modelTimeoutMs: experiment.agent?.timeoutMs ?? 30_000,
+		maxToolCalls: experiment.agent?.maxToolCalls ?? 8,
 		preparationStartedAt,
 		preparationDurationMs: Date.now() - preparationStartedMs,
 		preparationTimings,

@@ -16,7 +16,8 @@ export default defineDynamic({
 					"Repository root: /workspace/repo",
 					mutationBoundary,
 					`Bootstrap context:\n${JSON.stringify(prepared.bootstrap)}`,
-					`Model phase began at ${prepared.preparedAt} and has ${prepared.modelTimeoutMs}ms. Implement immediately, stay inside the compiled mutation boundary, then call finish_run exactly once.`,
+					`Hard execution budget: ${prepared.modelTimeoutMs}ms and at most ${prepared.maxToolCalls} exploratory/editing tool calls before finish_run. The bootstrap context is the primary source of truth; do not rediscover information already present there.`,
+					"Implement the smallest valid change immediately. Prefer direct edits over repository exploration. Call finish_run exactly once when the patch is ready.",
 				].join("\n\n"),
 			});
 		},

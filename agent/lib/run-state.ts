@@ -47,6 +47,7 @@ export type PreparedRun = {
 	mutationPaths: string[];
 	mutationRanges: MutationRange[];
 	modelTimeoutMs: number;
+	maxToolCalls: number;
 	preparationStartedAt: string;
 	preparationDurationMs: number;
 	preparationTimings: PreparationTimings;
@@ -58,6 +59,11 @@ export const preparedRun = defineState<PreparedRun | null>(
 	() => null,
 );
 
+const modelToolCalls = defineState<number>(
+	"nazare-wind-tunnel.model-tool-calls-v1",
+	() => 0,
+);
+
 export function requireModelBudget() {
 	const prepared = preparedRun.get();
 	if (!prepared) throw new Error("Subject preparation is incomplete");
@@ -65,6 +71,12 @@ export function requireModelBudget() {
 	if (Date.now() > deadline)
 		throw new Error(
 			`Model phase exceeded ${prepared.modelTimeoutMs}ms post-preparation budget`,
+		);
+	const calls = modelToolCalls.get() + 1;
+	modelToolCalls.update(() => calls);
+	if (calls > prepared.maxToolCalls)
+		throw new Error(
+			`Model phase exceeded ${prepared.maxToolCalls} tool calls; use prepared context and finish the patch instead of exploring further`,
 		);
 	return prepared;
 }

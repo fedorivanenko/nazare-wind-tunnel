@@ -38,7 +38,7 @@ export function bounded(text: string, maxBytes = MAX_TEXT_BYTES) {
 export type ExperimentDefinition = {
 	taskFile: string;
 	evaluator?: string;
-	agent?: { timeoutMs?: number };
+	agent?: { timeoutMs?: number; maxToolCalls?: number };
 	allowedPaths?: string[];
 	tools?: {
 		manifest?: string;
@@ -61,6 +61,15 @@ export function parseExperiment(text: string): ExperimentDefinition {
 	const value = JSON.parse(text) as ExperimentDefinition;
 	if (typeof value.taskFile !== "string" || !value.taskFile)
 		throw new Error("Experiment taskFile missing");
+	if (
+		value.agent?.maxToolCalls !== undefined &&
+		(!Number.isInteger(value.agent.maxToolCalls) ||
+			value.agent.maxToolCalls < 1 ||
+			value.agent.maxToolCalls > 32)
+	)
+		throw new Error(
+			"Experiment agent.maxToolCalls must be an integer from 1 to 32",
+		);
 	if (
 		value.allowedPaths !== undefined &&
 		(!Array.isArray(value.allowedPaths) ||
