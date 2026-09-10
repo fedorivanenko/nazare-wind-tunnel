@@ -14,7 +14,7 @@ const id = Astro.params.id ?? "";
     const eventsByType=(events,type)=>events.filter(event=>event.type===type);
     const eventAt=(event)=>Date.parse(event?.meta?.at??0);
     const formatDuration=(milliseconds)=>milliseconds<1000?`${Math.round(milliseconds)} ms`:`${(milliseconds/1000).toFixed(milliseconds<10000?1:0)} s`;
-    const compact=(value,limit=5000)=>{const text=typeof value==='string'?value:JSON.stringify(value,null,2);return text.length>limit?text.slice(0,limit)+'\n[truncated]':text;};
+    const compact=(value,limit=5000)=>{const serialized=typeof value==='string'?value:JSON.stringify(value,null,2);const text=serialized??String(value??'');return text.length>limit?text.slice(0,limit)+'\n[truncated]':text;};
     const remember=()=>{const key='nazare-eve-sessions';let sessions=[];try{sessions=JSON.parse(localStorage.getItem(key)||'[]')}catch{};sessions=[{id,at:new Date().toISOString()},...sessions.filter(item=>item.id!==id)].slice(0,30);localStorage.setItem(key,JSON.stringify(sessions));};
     function derive(events){
       const started=events.find(event=>event.type==='session.started');const latest=events.at(-1);const failed=events.find(event=>event.type==='turn.failed'||event.type==='session.failed');const waiting=events.find(event=>event.type==='session.waiting');
@@ -43,8 +43,11 @@ const id = Astro.params.id ?? "";
       return state.status;
     }
     async function refresh(){const response=await fetch(`/api/sessions/${encodeURIComponent(id)}`);if(!response.ok){document.querySelector('#app').innerHTML=`<div class="rounded-xl border border-red-900 bg-red-950/30 p-4 text-red-300">${escapeHtml(await response.text())}</div>`;return 'failed';}const payload=await response.json();return render(payload.events??[]);}
-    remember();
-    let status=await refresh();
-    const timer=setInterval(async()=>{if(document.visibilityState==='visible')status=await refresh();if(status!=='running')clearInterval(timer);},2000);
+    async function main(){
+      remember();
+      let status=await refresh();
+      const timer=setInterval(async()=>{if(document.visibilityState==='visible')status=await refresh();if(status!=='running')clearInterval(timer);},2000);
+    }
+    void main();
   </script>
 </Layout>
