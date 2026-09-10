@@ -110,7 +110,7 @@ Model selection now belongs to `agent/agent.ts`; experiment `agent` fields remai
 Vercel project:
 
 ```text
-fedor-hyumans-projects/nazare-wind-tunnel
+fedor-studio/nazare-wind-tunnel
 https://nazare-wind-tunnel.vercel.app
 ```
 
@@ -123,7 +123,7 @@ pnpm build
 pnpm deploy
 ```
 
-`eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template.
+`eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; pushes to `main` deploy automatically.
 
 ## Required configuration
 
@@ -131,10 +131,9 @@ Vercel production environment:
 
 ```text
 WIND_TUNNEL_TOKEN
-AI_GATEWAY_API_KEY
 ```
 
-`AI_GATEWAY_API_KEY` is currently explicit because project OIDC Gateway billing was not enabled. It can be removed after project AI Gateway billing/OIDC is configured and smoke-tested.
+Vercel project OIDC authenticates eve to AI Gateway automatically; no model-provider secret is configured.
 
 Hydrogen GitHub repository:
 
