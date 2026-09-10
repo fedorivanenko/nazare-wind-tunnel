@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {inspectPiExtensions, runPi} from './index.js';
+import {inspectPiExtensions, piRuntimeEnv, runPi} from './index.js';
+
+test('Pi environment includes selected provider key but excludes worker secrets',()=>{
+  process.env.AI_GATEWAY_API_KEY='provider-key';process.env.DATABASE_URL='database-secret';process.env.WIND_TUNNEL_TOKEN='control-secret';
+  try{const env=piRuntimeEnv('vercel-ai-gateway');assert.equal(env.AI_GATEWAY_API_KEY,'provider-key');assert.equal(env.DATABASE_URL,undefined);assert.equal(env.WIND_TUNNEL_TOKEN,undefined);}
+  finally{delete process.env.AI_GATEWAY_API_KEY;delete process.env.DATABASE_URL;delete process.env.WIND_TUNNEL_TOKEN;}
+});
 
 test('inspects registered custom tool schemas', async () => {
   const directory=await mkdtemp(path.join(os.tmpdir(),'wind-tunnel-extension-test-'));

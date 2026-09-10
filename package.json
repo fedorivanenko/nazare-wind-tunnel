@@ -11,7 +11,7 @@
     "dashboard": "pnpm --filter @nazare/wind-tunnel-dashboard start",
     "dashboard:build": "pnpm --filter @nazare/wind-tunnel-dashboard build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm --filter @nazare/wind-tunnel-domain test && pnpm --filter @nazare/wind-tunnel-pi test",
+    "test": "pnpm --filter @nazare/wind-tunnel-domain test && pnpm --filter @nazare/wind-tunnel-pi test && pnpm --filter @nazare/wind-tunnel-subject-manager test",
     "ci": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {

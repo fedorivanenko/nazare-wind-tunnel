@@ -97,13 +97,16 @@ On the first run for a repository, the worker clones it into:
 /workspace/repos/<owner>/<repo>
 ```
 
-Later runs reuse the same clone and `node_modules`:
+Later runs reuse the same trusted Git/dependency cache. Worker fetches only requested commit, resets trusted cache, then exports a `.git`-free per-run workspace:
 
 ```text
-git fetch --prune origin
+git fetch --no-tags --force origin <sourceSha>
 git reset --hard <sourceSha>
 git clean -fdx -e node_modules/
+git archive <sourceSha> → /workspace/runs/<runId>/subject
 ```
+
+Pi, bootstrap, and verification run in isolated export. Candidate patch capture uses trusted Git directory with temporary index after Pi exits.
 
 The worker requires `pnpm-lock.yaml`. It hashes the lockfile and only runs:
 
@@ -162,7 +165,16 @@ Worker additionally uses:
 ```text
 WIND_TUNNEL_WORKSPACE=/workspace
 WIND_TUNNEL_PNPM_STORE=/workspace/pnpm-store
+WIND_TUNNEL_ALLOWED_MODELS_JSON=["vercel-ai-gateway:openai/gpt-oss-20b","vercel-ai-gateway:openai/gpt-oss-120b"]
 ```
+
+Private subjects additionally require worker-only fine-grained GitHub token with read-only repository contents access:
+
+```text
+WIND_TUNNEL_GITHUB_TOKEN
+```
+
+Git authentication travels through process environment configuration, never URL/arguments/logs. Pi and subject-code subprocesses receive sanitized environments without database, object-storage, control-plane, or GitHub credentials.
 
 Model/provider credentials required by Pi also belong on the worker service. Vercel AI Gateway uses `AI_GATEWAY_API_KEY`.
 

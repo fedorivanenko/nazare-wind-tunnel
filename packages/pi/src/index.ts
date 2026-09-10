@@ -30,6 +30,17 @@ export type PiRunOptions = {
 export type PiTimeoutReason = 'startup' | 'idle' | 'overall' | null;
 export const PI_VERSION = '0.85.1';
 
+export function piRuntimeEnv(provider?:string,extra:NodeJS.ProcessEnv={}):NodeJS.ProcessEnv {
+  const env:NodeJS.ProcessEnv={PATH:process.env.PATH??'/usr/local/bin:/usr/bin:/bin',LANG:process.env.LANG??'C.UTF-8',LC_ALL:process.env.LC_ALL??'C.UTF-8',CI:'true',NODE_ENV:'production',...extra};
+  const normalized=String(provider??'').toLowerCase();
+  if(normalized.includes('gateway')&&process.env.AI_GATEWAY_API_KEY)env.AI_GATEWAY_API_KEY=process.env.AI_GATEWAY_API_KEY;
+  else if(normalized.includes('anthropic')&&process.env.ANTHROPIC_API_KEY)env.ANTHROPIC_API_KEY=process.env.ANTHROPIC_API_KEY;
+  else if(normalized.includes('google')&&process.env.GOOGLE_GENERATIVE_AI_API_KEY)env.GOOGLE_GENERATIVE_AI_API_KEY=process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  else if(normalized.includes('groq')&&process.env.GROQ_API_KEY)env.GROQ_API_KEY=process.env.GROQ_API_KEY;
+  else if(process.env.OPENAI_API_KEY)env.OPENAI_API_KEY=process.env.OPENAI_API_KEY;
+  return Object.fromEntries(Object.entries(env).filter((entry):entry is [string,string]=>typeof entry[1]==='string'));
+}
+
 export type ProviderProbe = {
   provider: string;
   model: string;
@@ -169,7 +180,7 @@ export async function runPi(options: PiRunOptions) {
   await mkdir(reportDirectory,{recursive:true});
   const reportOptions=`--report-on-signal --report-signal=SIGUSR2 --report-directory=${reportDirectory} --report-filename=${reportFilename}`;
   return await new Promise<{pid:number|null; exitCode:number|null; signal:NodeJS.Signals|null; stdout:string; stderr:string; stdoutBytes:number; stderrBytes:number; diagnosticReport:string|null; durationMs:number; timedOut:boolean; timeoutReason:PiTimeoutReason; aborted:boolean; firstOutputMs:number|null; lastActivityAt:string|null}>((resolve, reject) => {
-    const child = spawn(piBin, args, {cwd:options.cwd,stdio:['ignore','pipe','pipe'],env:{...process.env,NODE_OPTIONS:[process.env.NODE_OPTIONS,reportOptions].filter(Boolean).join(' '),PI_CODING_AGENT_DIR:path.join(reportDirectory,'config'),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'}});
+    const child = spawn(piBin,args,{cwd:options.cwd,stdio:['ignore','pipe','pipe'],env:piRuntimeEnv(options.provider,{NODE_OPTIONS:reportOptions,HOME:path.join(reportDirectory,'home'),PI_CODING_AGENT_DIR:path.join(reportDirectory,'config'),PI_SKIP_VERSION_CHECK:'1',PI_TELEMETRY:'0'})});
     let stdout = '';
     let stderr = '';
     let stdoutBytes = 0;

@@ -1,11 +1,12 @@
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {createHash, randomUUID} from 'node:crypto';
 import type {ExperimentDefinition, RunState, ToolConfig, VerificationSpec} from '@nazare/wind-tunnel-domain';
 import {MAX_AGENT_TIMEOUT_MS, normalizeVerification, resolveExperimentAgent, resolveExperimentTools, validateExperimentDefinition} from '@nazare/wind-tunnel-domain';
 import {appendEvent, claimNextRun, ensureSchema, isCancellationRequested, putArtifact, renewLease, saveRun} from '@nazare/wind-tunnel-storage';
-import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, inspectSubjectReadiness, runSubjectProcess, type SubjectProcessObserver} from '@nazare/wind-tunnel-subject-manager';
-import {inspectPiExtensions, normalizePiJsonLine, PI_VERSION, probeProvider, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
+import {captureSubjectChanges, cleanRunSubject, ensureDependencies, ensureSubject, getRunSubjectPath, inspectSubjectReadiness, materializeSubject, runSubjectProcess, type SubjectProcessObserver} from '@nazare/wind-tunnel-subject-manager';
+import {normalizePiJsonLine, PI_VERSION, probeProvider, runPi, type InspectedTool, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
 
 const WORKER_ID=process.env.WIND_TUNNEL_WORKER_ID??`${process.env.RAILWAY_SERVICE_NAME??'worker'}:${process.pid}:${randomUUID().slice(0,8)}`;
 const POLL_MS=Number(process.env.WIND_TUNNEL_POLL_MS??2_000);
@@ -14,12 +15,23 @@ const AGENT_STARTUP_TIMEOUT_MS=Number(process.env.WIND_TUNNEL_AGENT_STARTUP_TIME
 const AGENT_IDLE_TIMEOUT_MS=Number(process.env.WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS??60_000);
 const PROVIDER_PROBE_TIMEOUT_MS=Number(process.env.WIND_TUNNEL_PROVIDER_PROBE_TIMEOUT_MS??5_000);
 const CANCEL_POLL_MS=750;
+const DEFAULT_ALLOWED_MODELS=['vercel-ai-gateway:openai/gpt-oss-20b','vercel-ai-gateway:openai/gpt-oss-120b'];
+function parseAllowedModels(){
+  const raw=process.env.WIND_TUNNEL_ALLOWED_MODELS_JSON;
+  if(!raw)return DEFAULT_ALLOWED_MODELS;
+  let value:unknown;try{value=JSON.parse(raw);}catch{throw new Error('WIND_TUNNEL_ALLOWED_MODELS_JSON must be valid JSON');}
+  if(!Array.isArray(value)||value.length===0||value.some(item=>typeof item!=='string'||!item.includes(':')))throw new Error('WIND_TUNNEL_ALLOWED_MODELS_JSON must be a non-empty array of provider:model strings');
+  return Array.from(new Set(value));
+}
+const ALLOWED_MODELS=parseAllowedModels();
+const ALLOWED_MODELS_SHA256=createHash('sha256').update(JSON.stringify(ALLOWED_MODELS)).digest('hex');
 
 class RunCancelledError extends Error{constructor(){super('Run cancelled');this.name='RunCancelledError';}}
 class AgentTimeoutError extends Error{constructor(reason:PiTimeoutReason,timeoutMs:number){super(`Pi timed out (${reason??'unknown'}); overall budget ${timeoutMs}ms, startup ${AGENT_STARTUP_TIMEOUT_MS}ms, idle ${AGENT_IDLE_TIMEOUT_MS}ms`);this.name='AgentTimeoutError';}}
 class PreflightError extends Error{constructor(failures:string[]){super(`Subject preflight failed: ${failures.join('; ')}`);this.name='PreflightError';}}
 class ProviderPreflightError extends Error{constructor(message:string){super(`Provider preflight failed: ${message}`);this.name='ProviderPreflightError';}}
 class BootstrapError extends Error{constructor(message:string){super(`Bootstrap failed: ${message}`);this.name='BootstrapError';}}
+class ModelNotAllowedError extends Error{constructor(provider:string,model:string){super(`Model is not allowlisted: ${provider}:${model}`);this.name='ModelNotAllowedError';}}
 class ExperimentConfigError extends Error{constructor(failures:string[]){super(`Experiment configuration invalid: ${failures.join('; ')}`);this.name='ExperimentConfigError';}}
 
 function logWorkerEvent(runId:string|null,event:string,data:Record<string,unknown>={}){
@@ -60,6 +72,14 @@ async function resolveToolEnvironment(cwd:string,config:ToolConfig){
   }
   return {allow:config.allow,extensions,bootstrap};
 }
+async function inspectToolExtensions(cwd:string,extensions:Array<{path:string;absolutePath:string;sha256:string}>,observer?:SubjectProcessObserver):Promise<InspectedTool[]>{
+  if(!extensions.length)return [];
+  const inspector=process.env.WIND_TUNNEL_PI_INSPECTOR??fileURLToPath(new URL('../../../packages/pi/src/inspect-cli.ts',import.meta.url));
+  const result=await runSubjectProcess('pnpm',['exec','tsx',inspector],cwd,15_000,observer,{input:JSON.stringify(extensions)});
+  if(result.exitCode!==0||result.timedOut)throw new Error(result.stderr||result.stdout||`extension inspector exited ${result.exitCode}`);
+  if(result.stdoutBytes>1_000_000)throw new Error('extension inspector output exceeded 1000000 bytes');
+  return JSON.parse(result.stdout) as InspectedTool[];
+}
 async function assertNotCancelled(runId:string){if(await isCancellationRequested(runId))throw new RunCancelledError();}
 async function verify(cwd:string,checks:VerificationSpec[],runId:string,observer?:SubjectProcessObserver){
   const results=[];let stdout='';let stderr='';
@@ -79,7 +99,7 @@ async function runBootstrap(input:{cwd:string;repository:string;sourceSha:string
     const startedAt=new Date().toISOString();
     await appendEvent({runId:input.runId,type:'bootstrap.started',at:startedAt,data:{id:entry.id,entrypoint:entry.entrypoint,sha256:entry.sha256,timeoutMs:entry.timeoutMs,maxOutputBytes:entry.maxOutputBytes}});
     const payload=JSON.stringify({task:input.task,repository:input.repository,sourceSha:input.sourceSha});
-    const result=await runSubjectProcess('pnpm',['exec','tsx',entry.absolutePath],input.cwd,entry.timeoutMs,input.observer,payload).catch(error=>({exitCode:null,stdout:'',stderr:error instanceof Error?error.message:String(error),stdoutBytes:0,stderrBytes:0,durationMs:0,timedOut:false}));
+    const result=await runSubjectProcess('pnpm',['exec','tsx',entry.absolutePath],input.cwd,entry.timeoutMs,input.observer,{input:payload}).catch(error=>({exitCode:null,stdout:'',stderr:error instanceof Error?error.message:String(error),stdoutBytes:0,stderrBytes:0,durationMs:0,timedOut:false}));
     const failure=result.timedOut?`timed out after ${entry.timeoutMs}ms`:result.exitCode!==0?result.stderr||result.stdout||`exit ${result.exitCode}`:result.stdoutBytes>entry.maxOutputBytes?`output exceeded ${entry.maxOutputBytes} bytes`:null;
     if(failure){
       await appendEvent({runId:input.runId,type:'bootstrap.failed',at:new Date().toISOString(),data:{id:entry.id,durationMs:result.durationMs,required:entry.required,error:failure.slice(0,2_000)}});
@@ -101,18 +121,14 @@ async function runBootstrap(input:{cwd:string;repository:string;sourceSha:string
   return contexts;
 }
 
-async function captureWorkingTree(cwd:string,sourceSha:string,runId:string,partial:boolean,observer?:SubjectProcessObserver){
-  const intent=await runSubjectProcess('git',['add','--intent-to-add','--all'],cwd,60_000,observer);
-  if(intent.exitCode!==0||intent.timedOut)throw new Error(`Could not enumerate workspace changes: ${intent.stderr}`);
-  const patch=await runSubjectProcess('git',['diff','--no-ext-diff','--binary',sourceSha,'--','.'],cwd,60_000,observer);
-  const changed=await runSubjectProcess('git',['diff','--name-only',sourceSha,'--','.'],cwd,60_000,observer);
-  if(patch.exitCode!==0||patch.timedOut||changed.exitCode!==0||changed.timedOut)throw new Error(`Could not capture workspace changes: ${patch.stderr||changed.stderr}`);
-  const files=changed.stdout.split('\n').map(file=>file.trim()).filter(Boolean);
+async function captureWorkingTree(repository:string,sourceSha:string,runId:string,partial:boolean,observer?:SubjectProcessObserver){
+  const captured=await captureSubjectChanges(repository,sourceSha,runId,observer);
+  const files=captured.changedFiles.split('\n').map(file=>file.trim()).filter(Boolean);
   await Promise.all([
-    putArtifact({runId,type:'git.patch',name:'patch.diff',mediaType:'text/x-diff',content:patch.stdout}),
-    putArtifact({runId,type:'git.changed-files',name:'changed-files.txt',mediaType:'text/plain',content:changed.stdout}),
+    putArtifact({runId,type:'git.patch',name:'patch.diff',mediaType:'text/x-diff',content:captured.patch}),
+    putArtifact({runId,type:'git.changed-files',name:'changed-files.txt',mediaType:'text/plain',content:captured.changedFiles}),
   ]);
-  await appendEvent({runId,type:'workspace.captured',at:new Date().toISOString(),data:{partial,files,changedFiles:files.length,patchBytes:Buffer.byteLength(patch.stdout)}});
+  await appendEvent({runId,type:'workspace.captured',at:new Date().toISOString(),data:{partial,files,changedFiles:files.length,patchBytes:Buffer.byteLength(captured.patch)}});
 }
 
 async function executeRun(claimed:RunState){
@@ -152,14 +168,15 @@ async function executeRun(claimed:RunState){
   };
   const processObserver:SubjectProcessObserver=observation=>enqueueEvent(`subject.process.${observation.type}`,observation as unknown as Record<string,unknown>,true);
   const heartbeat=setInterval(()=>{renewLease(state.runId,WORKER_ID).catch(error=>logWorkerEvent(state.runId,'worker.lease.failed',{error:error instanceof Error?error.message:String(error)}));},HEARTBEAT_MS);heartbeat.unref();
-  const repository=state.spec.subject.repository;const sourceSha=state.spec.subject.githubSha;const cwd=getSubjectPath(repository);
+  const repository=state.spec.subject.repository;const sourceSha=state.spec.subject.githubSha;const cwd=getRunSubjectPath(state.runId);
   try{
     await observedEvent('worker.claimed',{workerId:WORKER_ID,attempt:state.attempts});
     await assertNotCancelled(state.runId);
     await observedEvent('subject.preparing',{repository,sourceSha});
     await ensureSubject(repository,sourceSha,processObserver);await eventWrites;
     const deps=await ensureDependencies(repository,processObserver);await eventWrites;
-    await observedEvent('subject.ready',deps);
+    const materialized=await materializeSubject(repository,sourceSha,state.runId,processObserver);await eventWrites;
+    await observedEvent('subject.ready',{...deps,cwd:materialized.cwd,gitMetadataIsolated:materialized.gitMetadataIsolated});
     await assertNotCancelled(state.runId);
 
     const experimentRaw=await readFile(path.join(cwd,state.spec.experiment.path),'utf8');
@@ -167,9 +184,10 @@ async function executeRun(claimed:RunState){
     const configErrors=validateExperimentDefinition(definition);
     if(configErrors.length)throw new ExperimentConfigError(configErrors);
     const resolvedAgent=resolveExperimentAgent(definition);
+    if(!ALLOWED_MODELS.includes(`${resolvedAgent.provider}:${resolvedAgent.model}`))throw new ModelNotAllowedError(resolvedAgent.provider,resolvedAgent.model);
     const resolvedTools=resolveExperimentTools(definition);
     const toolEnvironment=await resolveToolEnvironment(cwd,resolvedTools);
-    const inspectedTools=await inspectPiExtensions(toolEnvironment.extensions).catch(error=>{throw new ExperimentConfigError([`tool extension load failed: ${error instanceof Error?error.message:String(error)}`]);});
+    const inspectedTools=await inspectToolExtensions(cwd,toolEnvironment.extensions,processObserver).catch(error=>{throw new ExperimentConfigError([`tool extension load failed: ${error instanceof Error?error.message:String(error)}`]);});
     const builtinTools=new Set(['read','bash','edit','write']);
     const inspectedByName=new Map(inspectedTools.map(tool=>[tool.name,tool]));
     const missingTools=toolEnvironment.allow.filter(name=>!builtinTools.has(name)&&!inspectedByName.has(name));
@@ -184,7 +202,7 @@ async function executeRun(claimed:RunState){
     const checks=normalizeVerification(definition);
 
     await observedEvent('subject.preflight.started');
-    const preflight=await inspectSubjectReadiness({repository,expectedSha:sourceSha,experimentPath:state.spec.experiment.path,taskPath,provider:resolvedAgent.provider,dependenciesInstalled:deps.installed});
+    const preflight=await inspectSubjectReadiness({repository,expectedSha:sourceSha,experimentPath:state.spec.experiment.path,taskPath,provider:resolvedAgent.provider,dependenciesInstalled:deps.installed,cwd});
     await putArtifact({runId:state.runId,type:'subject.preflight',name:'preflight.json',mediaType:'application/json',content:JSON.stringify(preflight,null,2)});
     await observedEvent('subject.preflight.completed',preflight as unknown as Record<string,unknown>);
     if(!preflight.ok)throw new PreflightError(preflight.failures);
@@ -211,7 +229,7 @@ async function executeRun(claimed:RunState){
     const prompt=buildPrompt(task,bootstrapContext);
     const agentTimeoutMs=Math.min(MAX_AGENT_TIMEOUT_MS,Math.max(30_000,resolvedAgent.timeoutMs));
     const lockfile=await readFile(path.join(cwd,'pnpm-lock.yaml'));
-    await putArtifact({runId:state.runId,type:'run.environment',name:'environment.json',mediaType:'application/json',content:JSON.stringify({runner:{commitSha:process.env.RAILWAY_GIT_COMMIT_SHA??null,deploymentId:process.env.RAILWAY_DEPLOYMENT_ID??null,node:process.versions.node,pi:PI_VERSION,pnpm:'10.17.1'},subject:{repository,sourceSha,lockfileSha256:sha256(lockfile)},agent:{...resolvedAgent,effectiveTimeoutMs:agentTimeoutMs},tools:pinnedTools,promptSha256:sha256(prompt)},null,2)});
+    await putArtifact({runId:state.runId,type:'run.environment',name:'environment.json',mediaType:'application/json',content:JSON.stringify({runner:{commitSha:process.env.RAILWAY_GIT_COMMIT_SHA??null,deploymentId:process.env.RAILWAY_DEPLOYMENT_ID??null,node:process.versions.node,pi:PI_VERSION,pnpm:'10.17.1'},subject:{repository,sourceSha,lockfileSha256:sha256(lockfile)},agent:{...resolvedAgent,effectiveTimeoutMs:agentTimeoutMs,allowlistSha256:ALLOWED_MODELS_SHA256,allowlisted:true},tools:pinnedTools,promptSha256:sha256(prompt)},null,2)});
     await putArtifact({runId:state.runId,type:'agent.prompt',name:'prompt.txt',mediaType:'text/plain',content:prompt});
     state=await saveRun({...state,status:'running',error:null,errorCode:null,startedAt:state.startedAt??new Date().toISOString()});
     await observedEvent('agent.started',{timeoutMs:agentTimeoutMs,startupTimeoutMs:AGENT_STARTUP_TIMEOUT_MS,idleTimeoutMs:AGENT_IDLE_TIMEOUT_MS,provider:resolvedAgent.provider,model:resolvedAgent.model,thinking:resolvedAgent.thinking,preflight:true});
@@ -250,7 +268,7 @@ async function executeRun(claimed:RunState){
       await Promise.all(uploads);
       await observedEvent('artifact.upload.completed',{artifacts:agentArtifactNames});
     }catch(error){await observedEvent('artifact.upload.failed',{error:error instanceof Error?error.message:String(error)});throw error;}
-    await captureWorkingTree(cwd,sourceSha,state.runId,agent.aborted||agent.timedOut||agent.exitCode!==0,processObserver);workspaceCaptured=true;await eventWrites;
+    await captureWorkingTree(repository,sourceSha,state.runId,agent.aborted||agent.timedOut||agent.exitCode!==0,processObserver);workspaceCaptured=true;await eventWrites;
     if(agent.aborted)throw new RunCancelledError();
     if(agent.timedOut)throw new AgentTimeoutError(agent.timeoutReason,agentTimeoutMs);
     if(agent.exitCode!==0)throw new Error(`Pi exited ${agent.exitCode}`);
@@ -266,11 +284,11 @@ async function executeRun(claimed:RunState){
     logWorkerEvent(state.runId,'run.completed',{outcome:state.outcome});await appendEvent({runId:state.runId,type:'run.completed',at:finishedAt,data:{outcome:state.outcome}});
   }catch(error){
     flushDeltas();await eventWrites;
-    if(!workspaceCaptured){await captureWorkingTree(cwd,sourceSha,state.runId,true,processObserver).then(()=>{workspaceCaptured=true;}).catch(captureError=>logWorkerEvent(state.runId,'workspace.capture.failed',{error:captureError instanceof Error?captureError.message:String(captureError)}));await eventWrites;}
+    if(!workspaceCaptured){await captureWorkingTree(repository,sourceSha,state.runId,true,processObserver).then(()=>{workspaceCaptured=true;}).catch(captureError=>logWorkerEvent(state.runId,'workspace.capture.failed',{error:captureError instanceof Error?captureError.message:String(captureError)}));await eventWrites;}
     const finishedAt=new Date().toISOString();const cancelled=error instanceof RunCancelledError||await isCancellationRequested(state.runId).catch(()=>false);
     if(cancelled){state=await saveRun({...state,status:'cancelled',outcome:null,error:null,errorCode:null,finishedAt});logWorkerEvent(state.runId,'run.cancelled');await appendEvent({runId:state.runId,type:'run.cancelled',at:finishedAt,data:{workerId:WORKER_ID}}).catch(()=>{});}
-    else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ProviderPreflightError?'provider_preflight_failed':error instanceof BootstrapError?'bootstrap_failed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
-  }finally{clearInterval(heartbeat);flushDeltas();await eventWrites;await cleanSubject(repository).catch(error=>logWorkerEvent(state.runId,'subject.cleanup.failed',{error:error instanceof Error?error.message:String(error)}));}
+    else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ProviderPreflightError?'provider_preflight_failed':error instanceof BootstrapError?'bootstrap_failed':error instanceof ModelNotAllowedError?'model_not_allowed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
+  }finally{clearInterval(heartbeat);flushDeltas();await eventWrites;await cleanRunSubject(state.runId).catch(error=>logWorkerEvent(state.runId,'subject.cleanup.failed',{error:error instanceof Error?error.message:String(error)}));}
 }
 
 await ensureSchema();logWorkerEvent(null,'worker.ready',{pid:process.pid,pollMs:POLL_MS,heartbeatMs:HEARTBEAT_MS});

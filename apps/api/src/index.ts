@@ -24,7 +24,7 @@ await ensureSchema();
 createServer(async (req,res)=>{
   try {
     const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`);
-    if(url.pathname==='/health'){json(res,200,{ok:true,service:'nazare-wind-tunnel-api',version:8,agentConfigSource:'experiment'});return;}
+    if(url.pathname==='/health'){json(res,200,{ok:true,service:'nazare-wind-tunnel-api',version:9,agentConfigSource:'experiment'});return;}
     if(!authorized(req)){json(res,TOKEN?401:503,{error:TOKEN?'unauthorized':'WIND_TUNNEL_TOKEN is not configured'});return;}
 
     if(req.method==='POST'&&url.pathname==='/runs'){
