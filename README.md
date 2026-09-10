@@ -38,9 +38,9 @@ Inside sandbox:
 3. It installs dependencies with pinned pnpm `10.17.1`.
 4. Network changes to `deny-all` before subject bootstrap/model execution.
 5. Target-owned tool manifests are validated and exposed dynamically by eve.
-6. Agent mutates candidate.
-7. `finish_run` captures the binary patch and destroys the mutation sandbox.
-8. A fresh sandbox rematerializes exact source, applies only the captured patch, and runs the untouched evaluator.
+6. Agent mutates candidate inside the compiled mutation boundary when the subject declares one.
+7. `finish_run` captures the binary patch, rejects edits outside the compiled mutation boundary, and destroys the mutation sandbox.
+8. A fresh sandbox rematerializes exact source, applies only the captured patch, and runs the untouched progressive evaluator.
 
 No clone, fetch, push, or golden reference occurs in agent sandbox.
 
@@ -129,7 +129,21 @@ pnpm build
 pnpm deploy
 ```
 
-`eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; pushes to `main` deploy automatically.
+`eve build` creates Vercel Workflow/web output and prewarms a reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; pushes to `main` deploy automatically.
+
+### Optional warm base snapshot
+
+The Eve sandbox template can be seeded from a trusted Vercel Sandbox snapshot by setting:
+
+```text
+WIND_TUNNEL_BASE_SNAPSHOT_ID=snap_...
+```
+
+When configured, `agent/sandbox/sandbox.ts` passes that snapshot to Eve's Vercel backend as the template source. Eve performs its own bootstrap on top of the snapshot and all run sandboxes derive from the resulting Eve-owned template. The snapshot ID is included in the template revalidation key, so changing it forces a new template.
+
+The base snapshot must contain only trusted reusable environment state such as the pinned package manager, toolchain, and optionally a warmed pnpm store. It must not contain candidate source, repository credentials, model credentials, control-plane credentials, or experiment-specific mutable state. Exact candidate code still enters each run only through the immutable `source.tar.gz` GitHub archive.
+
+This optimization is template-scoped rather than PR-scoped: it avoids repeatedly constructing stable environment layers while preserving exact-source preparation and fresh verification for each run.
 
 ## Dashboard
 
@@ -149,6 +163,9 @@ eve project production environment:
 ```text
 WIND_TUNNEL_TOKEN
 DATABASE_URL
+
+# optional trusted reusable Vercel Sandbox snapshot
+WIND_TUNNEL_BASE_SNAPSHOT_ID=snap_...
 ```
 
 Dashboard project production environment:
