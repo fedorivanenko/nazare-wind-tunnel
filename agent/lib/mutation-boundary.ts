@@ -45,9 +45,7 @@ function hunkInsideRange(hunk: DiffHunk, range: MutationRange) {
 
 export function escapingSymbolHunks(diff: string, ranges: MutationRange[]) {
 	if (!ranges.length) return [];
-	const rangedFiles = new Set(ranges.map((range) => range.file));
-	return parseUnifiedZeroDiff(diff).filter((hunk) => {
-		if (!rangedFiles.has(hunk.file)) return false;
-		return !ranges.some((range) => hunkInsideRange(hunk, range));
-	});
+	return parseUnifiedZeroDiff(diff).filter(
+		(hunk) => !ranges.some((range) => hunkInsideRange(hunk, range)),
+	);
 }

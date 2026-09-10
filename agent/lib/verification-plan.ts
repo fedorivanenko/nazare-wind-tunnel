@@ -23,7 +23,7 @@ export async function runVerificationPlan(
 			durationMs: number;
 		}
 	> = [];
-	const tiers = ["structural", "focused", "behavioral", "full"] as const;
+	const tiers = ["behavioral", "structural", "focused", "full"] as const;
 
 	for (const tier of tiers) {
 		const tierChecks = checks.filter(

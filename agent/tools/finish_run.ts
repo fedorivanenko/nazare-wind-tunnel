@@ -3,12 +3,17 @@ import { defineTool, type ToolContext } from "eve/tools";
 import { z } from "zod";
 import { resolveEvaluator } from "../lib/evaluators";
 import { escapingSymbolHunks } from "../lib/mutation-boundary";
+import {
+	loadSubjectContract,
+	subjectDependencyInstallCommand,
+} from "../lib/prepared-subject";
 import { preparedRun } from "../lib/run-state";
 import {
 	bounded,
 	parseExperiment,
 	REPOSITORY_ROOT,
 	requiredText,
+	shellQuote,
 } from "../lib/subject";
 import { runVerificationPlan } from "../lib/verification-plan";
 
@@ -123,6 +128,15 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	}
 
 	const mutationRanges = prepared?.mutationRanges ?? [];
+	const unrangedChangedFiles = mutationRanges.length
+		? changedFiles.filter(
+				(file) => !mutationRanges.some((range) => range.file === file),
+			)
+		: [];
+	if (unrangedChangedFiles.length)
+		throw new Error(
+			`Candidate patch modifies files without compiled symbol boundaries: ${unrangedChangedFiles.join(", ")}`,
+		);
 	const escapedHunks = escapingSymbolHunks(
 		zeroContextDiff.stdout,
 		mutationRanges,
@@ -180,9 +194,10 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			`Fresh verification source setup failed with exit ${sourceSetup.exitCode}: ${bounded(sourceSetup.stderr || sourceSetup.stdout, 20_000)}`,
 		);
 
+	const verificationSubjectContract = await loadSubjectContract(ctx);
 	const verificationDependencyInstallStartedMs = Date.now();
 	const dependencyInstall = await verificationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline --store-dir /workspace/.pnpm-store`,
+		command: `cd ${REPOSITORY_ROOT} && timeout 180s bash -lc ${shellQuote(subjectDependencyInstallCommand(verificationSubjectContract))}`,
 	});
 	const verificationDependencyInstallMs =
 		Date.now() - verificationDependencyInstallStartedMs;

@@ -5,6 +5,7 @@ import {
 	compileSubject,
 	dependencyKey,
 	loadSubjectContract,
+	subjectDependencyInstallCommand,
 } from "./prepared-subject";
 import { type MutationRange, preparedRun } from "./run-state";
 import {
@@ -103,9 +104,10 @@ export async function prepareSubject(
 			`Subject source setup failed with exit ${sourceSetup.exitCode}: ${bounded(sourceSetup.stderr || sourceSetup.stdout || "no command output", 20_000)}`,
 		);
 
+	const subjectContract = await loadSubjectContract(ctx);
 	const dependencyInstallStartedMs = Date.now();
 	const dependencyInstall = await sandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && pnpm install --frozen-lockfile --prefer-offline --store-dir /workspace/.pnpm-store`,
+		command: `cd ${REPOSITORY_ROOT} && timeout 180s bash -lc ${shellQuote(subjectDependencyInstallCommand(subjectContract))}`,
 	});
 	const dependencyInstallMs = Date.now() - dependencyInstallStartedMs;
 	if (dependencyInstall.exitCode !== 0)
@@ -114,7 +116,6 @@ export async function prepareSubject(
 		);
 
 	const subjectCompileStartedMs = Date.now();
-	const subjectContract = await loadSubjectContract(ctx);
 	const preparedDependencyKey = subjectContract
 		? await dependencyKey(subjectContract, ctx)
 		: null;

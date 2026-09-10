@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import type { ToolContext } from "eve/tools";
 import { z } from "zod";
 import {
@@ -16,7 +17,7 @@ const SubjectContractSchema = z.object({
 	}),
 	dependencies: z.object({
 		lockfile: z.string().min(1),
-		install: z.string().min(1),
+		install: z.string().min(1).max(500),
 	}),
 	compile: z.object({
 		entrypoint: z.string().min(1),
@@ -59,13 +60,26 @@ export async function dependencyKey(
 		.digest("hex");
 }
 
+export function subjectDependencyInstallCommand(
+	contract: SubjectContract | null,
+) {
+	return (
+		contract?.dependencies.install ??
+		"pnpm install --frozen-lockfile --prefer-offline --store-dir /workspace/.pnpm-store"
+	);
+}
+
 export async function compileSubject(
 	contract: SubjectContract,
 	ctx: Pick<ToolContext, "getSandbox">,
 ) {
 	const sandbox = await ctx.getSandbox();
-	const outputPath = contract.compile.output;
-	if (!outputPath.startsWith("/workspace/"))
+	const outputPath = path.posix.normalize(contract.compile.output);
+	if (
+		!outputPath.startsWith("/workspace/") ||
+		outputPath === REPOSITORY_ROOT ||
+		outputPath.startsWith(`${REPOSITORY_ROOT}/`)
+	)
 		throw new Error(
 			"Compiled subject output must live under /workspace outside the candidate repository",
 		);
