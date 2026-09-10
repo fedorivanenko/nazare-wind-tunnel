@@ -67,7 +67,9 @@ export function parseExperiment(text: string): ExperimentDefinition {
 			value.agent.maxToolCalls < 1 ||
 			value.agent.maxToolCalls > 32)
 	)
-		throw new Error("Experiment agent.maxToolCalls must be an integer from 1 to 32");
+		throw new Error(
+			"Experiment agent.maxToolCalls must be an integer from 1 to 32",
+		);
 	if (
 		value.allowedPaths !== undefined &&
 		(!Array.isArray(value.allowedPaths) ||
