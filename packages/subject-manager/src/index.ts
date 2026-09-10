@@ -9,7 +9,7 @@ const REPOS_ROOT = path.join(WORKSPACE_ROOT, 'repos');
 const STATE_ROOT = path.join(WORKSPACE_ROOT, '.wind-tunnel', 'subjects');
 const PNPM_STORE_DIR = process.env.WIND_TUNNEL_PNPM_STORE ?? path.join(WORKSPACE_ROOT, 'pnpm-store');
 
-type ProcessResult = {exitCode: number | null; stdout: string; stderr: string; durationMs: number; timedOut: boolean};
+type ProcessResult = {exitCode: number | null; stdout: string; stderr: string; stdoutBytes:number; stderrBytes:number; durationMs: number; timedOut: boolean};
 
 export type SubjectProcessObservation = {
   type: 'started' | 'activity' | 'completed' | 'error';
@@ -64,7 +64,7 @@ function assertRepository(repository: string) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error(`Invalid GitHub repository: ${repository}`);
 }
 
-export async function runSubjectProcess(file: string, args: string[], cwd: string, timeoutMs = 10 * 60 * 1000, observer?: SubjectProcessObserver): Promise<ProcessResult> {
+export async function runSubjectProcess(file: string, args: string[], cwd: string, timeoutMs = 10 * 60 * 1000, observer?: SubjectProcessObserver, input?:string): Promise<ProcessResult> {
   const started = Date.now();
   return await new Promise((resolve, reject) => {
     const child = spawn(file, args, {cwd, env: process.env});
@@ -81,7 +81,7 @@ export async function runSubjectProcess(file: string, args: string[], cwd: strin
       lastActivityReport = now;
       observe({type:'activity',pid:child.pid,durationMs:now-started,stdoutBytes,stderrBytes});
     };
-    child.on('spawn', () => observe({type:'started',pid:child.pid}));
+    child.on('spawn', () => {observe({type:'started',pid:child.pid});child.stdin?.end(input);});
     child.stdout?.on('data', chunk => { const text=chunk.toString();stdoutBytes+=Buffer.byteLength(text);stdout=(stdout+text).slice(-5_000_000);reportActivity(); });
     child.stderr?.on('data', chunk => { const text=chunk.toString();stderrBytes+=Buffer.byteLength(text);stderr=(stderr+text).slice(-5_000_000);reportActivity(); });
     child.on('error', error => {observe({type:'error',pid:child.pid,error:error.message});reject(error);});
@@ -94,7 +94,7 @@ export async function runSubjectProcess(file: string, args: string[], cwd: strin
       clearTimeout(timer);
       const durationMs=Date.now()-started;
       observe({type:'completed',pid:child.pid,durationMs,exitCode,timedOut,stdoutBytes,stderrBytes});
-      resolve({exitCode, stdout, stderr, durationMs, timedOut});
+      resolve({exitCode, stdout, stderr, stdoutBytes, stderrBytes, durationMs, timedOut});
     });
   });
 }

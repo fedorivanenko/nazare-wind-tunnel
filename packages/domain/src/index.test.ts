@@ -9,15 +9,20 @@ test('normalizes verifier commands', () => {
 });
 
 test('validates and resolves experiment agent config', () => {
-  const definition={id:'x',taskFile:'task.md',agent:{provider:'vercel-ai-gateway',model:'openai/gpt-oss-20b',thinking:'low',timeoutMs:900_000},tools:{allow:['read','edit','project_search'],extensions:['.wind-tunnel/tools.ts']},verification:['pnpm test']};
+  const definition={id:'x',taskFile:'task.md',agent:{provider:'vercel-ai-gateway',model:'openai/gpt-oss-20b',thinking:'low',timeoutMs:900_000},tools:{allow:['read','edit','project_search'],extensions:['.wind-tunnel/tools.ts'],bootstrap:[{id:'context',entrypoint:'.wind-tunnel/context.ts'}]},verification:['pnpm test']};
   assert.deepEqual(validateExperimentDefinition(definition),[]);
   assert.deepEqual(resolveExperimentAgent(definition),{provider:'vercel-ai-gateway',model:'openai/gpt-oss-20b',thinking:'low',timeoutMs:900_000});
-  assert.deepEqual(resolveExperimentTools(definition),definition.tools);
+  assert.deepEqual(resolveExperimentTools(definition),{allow:definition.tools.allow,extensions:definition.tools.extensions,bootstrap:[{id:'context',entrypoint:'.wind-tunnel/context.ts',timeoutMs:3_000,maxOutputBytes:24_000,required:true}]});
 });
 
 test('rejects missing agent config', () => {
   const errors=validateExperimentDefinition({id:'x',taskFile:'task.md',verification:['pnpm test']});
   assert.ok(errors.includes('agent is required'));
+});
+
+test('rejects unsafe bootstrap entrypoints', () => {
+  const definition={id:'x',taskFile:'task.md',agent:{provider:'p',model:'m',timeoutMs:30_000},tools:{bootstrap:[{entrypoint:'../context.ts'}]},verification:['pnpm test']};
+  assert.ok(validateExperimentDefinition(definition).some(error=>error.includes('entrypoint')));
 });
 
 test('derives elapsed time', () => {

@@ -72,13 +72,22 @@ The API stores the immutable request in Postgres and returns immediately. Experi
   },
   "tools": {
     "allow": ["read", "bash", "edit", "write", "project_search"],
-    "extensions": [".wind-tunnel/project-tools.ts"]
+    "extensions": [".wind-tunnel/project-tools.ts"],
+    "bootstrap": [{
+      "id": "task-context",
+      "entrypoint": ".wind-tunnel/prepare-change.ts",
+      "timeoutMs": 3000,
+      "maxOutputBytes": 24000,
+      "required": true
+    }]
   },
   "verification": ["pnpm test"]
 }
 ```
 
-Pi starts with ambient extensions, skills, prompt templates, and context files disabled. Only declared tools and extensions load. If `tools` is omitted, fixed defaults are `read`, `bash`, `edit`, and `write`.
+Pi starts with ambient extensions, skills, prompt templates, and context files disabled. Only declared tools and extensions load. If `tools` is omitted, fixed defaults are `read`, `bash`, `edit`, and `write` with no bootstrap providers.
+
+Before model launch, worker loads declared extensions and records effective custom-tool descriptions and JSON schemas. Missing, duplicate, or unloadable allowlisted tools fail preflight. Bootstrap entrypoints execute through `pnpm exec tsx` with task JSON on stdin. Their bounded JSON output becomes pinned prompt context and an artifact. Bootstrap work is measured separately from model-initiated tool calls.
 
 ## Persistent subject cache
 
@@ -165,7 +174,7 @@ WIND_TUNNEL_AGENT_STARTUP_TIMEOUT_MS=15000
 WIND_TUNNEL_AGENT_IDLE_TIMEOUT_MS=60000
 ```
 
-Before Pi starts, worker performs an authenticated provider/model probe and hashes declared tool extensions. Pi runs with `--offline` to skip startup catalog/version network operations; model inference remains online. PostgreSQL stores lifecycle, batched conversation, tool, workspace, and verification events. Full Pi JSONL remains in S3. Every outcome—including timeout and cancellation—captures `patch.diff` and `changed-files.txt` before cleanup. `environment.json` and `tool-manifest.json` record pinned execution evidence. Timeout diagnostics include Pi stdout/stderr, `agent-diagnostics.json`, and a redacted Node diagnostic report when Pi can produce one.
+Before Pi starts, worker performs an authenticated provider/model probe, inspects declared tool schemas, hashes extensions/bootstrap providers, and executes required deterministic context providers. Pi runs with `--offline` to skip startup catalog/version network operations; model inference remains online. PostgreSQL stores lifecycle, batched conversation, tool, workspace, and verification events. Full Pi JSONL remains in S3. Every outcome—including timeout and cancellation—captures `patch.diff` and `changed-files.txt` before cleanup. `environment.json` and `tool-manifest.json` record pinned execution evidence. Timeout diagnostics include Pi stdout/stderr, `agent-diagnostics.json`, and a redacted Node diagnostic report when Pi can produce one.
 
 ## CI
 

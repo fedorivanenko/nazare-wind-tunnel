@@ -3,12 +3,13 @@ export type RunOutcome = 'pass' | 'fail' | 'inconclusive' | null;
 export const MAX_AGENT_TIMEOUT_MS = 15 * 60_000;
 
 export type VerificationSpec = {id:string;command:string;timeoutMs:number;required:boolean};
-export type ToolConfig = {allow:string[];extensions:string[]};
+export type BootstrapConfig = {id:string;entrypoint:string;timeoutMs:number;maxOutputBytes:number;required:boolean};
+export type ToolConfig = {allow:string[];extensions:string[];bootstrap:BootstrapConfig[]};
 export type ExperimentDefinition = {
   id:string;
   taskFile:string;
   agent?: {provider?:string;model?:string;thinking?:string;timeoutMs?:number};
-  tools?: {allow?:string[];extensions?:string[]};
+  tools?: {allow?:string[];extensions?:string[];bootstrap?:Array<{id?:string;entrypoint?:string;timeoutMs?:number;maxOutputBytes?:number;required?:boolean}>};
   verification:Array<string | (Partial<VerificationSpec> & Pick<VerificationSpec,'command'>)>;
 };
 export type RunSpec = {runId:string;subject:{repository:string;githubSha:string};experiment:{path:string};agent:{provider:string|null;model:string|null;thinking:string|null;timeoutMs:number};tools:ToolConfig|null;createdAt:string};
@@ -34,6 +35,15 @@ export function validateExperimentDefinition(definition: ExperimentDefinition): 
     if (!tools || typeof tools!=='object') errors.push('tools must be an object');
     if (tools.allow != null && (!Array.isArray(tools.allow) || tools.allow.length===0 || tools.allow.some(name=>typeof name!=='string'||!name.trim()))) errors.push('tools.allow must be a non-empty array of tool names');
     if (tools.extensions != null && (!Array.isArray(tools.extensions) || tools.extensions.some(extension=>typeof extension!=='string'||!extension.trim()||extension.startsWith('/')||extension.split(/[\\/]/).includes('..')))) errors.push('tools.extensions must contain safe repo-relative paths');
+    if (tools.bootstrap != null && !Array.isArray(tools.bootstrap)) errors.push('tools.bootstrap must be an array');
+    else tools.bootstrap?.forEach((item,index)=>{
+      if(!item||typeof item!=='object') {errors.push(`tools.bootstrap[${index}] must be an object`);return;}
+      if(typeof item.entrypoint!=='string'||!item.entrypoint.trim()||item.entrypoint.startsWith('/')||item.entrypoint.split(/[\\/]/).includes('..')) errors.push(`tools.bootstrap[${index}].entrypoint must be a safe repo-relative path`);
+      if(item.id!=null&&(typeof item.id!=='string'||!item.id.trim())) errors.push(`tools.bootstrap[${index}].id must be a non-empty string`);
+      if(item.timeoutMs!=null&&(!Number.isInteger(item.timeoutMs)||Number(item.timeoutMs)<100||Number(item.timeoutMs)>30_000)) errors.push(`tools.bootstrap[${index}].timeoutMs must be an integer from 100 to 30000`);
+      if(item.maxOutputBytes!=null&&(!Number.isInteger(item.maxOutputBytes)||Number(item.maxOutputBytes)<1_024||Number(item.maxOutputBytes)>100_000)) errors.push(`tools.bootstrap[${index}].maxOutputBytes must be an integer from 1024 to 100000`);
+      if(item.required!=null&&typeof item.required!=='boolean') errors.push(`tools.bootstrap[${index}].required must be boolean`);
+    });
   }
   if (!Array.isArray(definition.verification) || definition.verification.length===0) errors.push('verification must be a non-empty array');
   else definition.verification.forEach((item,index)=>{
@@ -52,7 +62,11 @@ export function resolveExperimentAgent(definition: ExperimentDefinition) {
 }
 
 export function resolveExperimentTools(definition: ExperimentDefinition): ToolConfig {
-  return {allow:definition.tools?.allow?.map(name=>name.trim())??['read','bash','edit','write'],extensions:definition.tools?.extensions?.map(extension=>extension.trim())??[]};
+  return {
+    allow:definition.tools?.allow?.map(name=>name.trim())??['read','bash','edit','write'],
+    extensions:definition.tools?.extensions?.map(extension=>extension.trim())??[],
+    bootstrap:(definition.tools?.bootstrap??[]).map((item,index)=>({id:item.id?.trim()||`bootstrap-${index+1}`,entrypoint:String(item.entrypoint).trim(),timeoutMs:item.timeoutMs??3_000,maxOutputBytes:item.maxOutputBytes??24_000,required:item.required??true})),
+  };
 }
 
 export function normalizeVerification(definition: ExperimentDefinition): VerificationSpec[] {

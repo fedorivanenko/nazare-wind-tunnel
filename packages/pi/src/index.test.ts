@@ -3,7 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runPi} from './index.js';
+import {inspectPiExtensions, runPi} from './index.js';
+
+test('inspects registered custom tool schemas', async () => {
+  const directory=await mkdtemp(path.join(os.tmpdir(),'wind-tunnel-extension-test-'));
+  const extension=path.join(directory,'tools.mjs');
+  await writeFile(extension,`export default pi => pi.registerTool({name:'project_search',label:'Project Search',description:'Search project',promptSnippet:'Search first',parameters:{type:'object',properties:{query:{type:'string'}}}});`);
+  try{
+    assert.deepEqual(await inspectPiExtensions([{path:'.wind-tunnel/tools.mjs',absolutePath:extension,sha256:'fixture'}]),[{name:'project_search',label:'Project Search',description:'Search project',promptSnippet:'Search first',parameters:{type:'object',properties:{query:{type:'string'}}},extension:'.wind-tunnel/tools.mjs'}]);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
 
 test('closes Pi stdin when prompt is passed as an argument', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'wind-tunnel-pi-test-'));

@@ -5,7 +5,7 @@ import type {ExperimentDefinition, RunState, ToolConfig, VerificationSpec} from 
 import {MAX_AGENT_TIMEOUT_MS, normalizeVerification, resolveExperimentAgent, resolveExperimentTools, validateExperimentDefinition} from '@nazare/wind-tunnel-domain';
 import {appendEvent, claimNextRun, ensureSchema, isCancellationRequested, putArtifact, renewLease, saveRun} from '@nazare/wind-tunnel-storage';
 import {cleanSubject, ensureDependencies, ensureSubject, getSubjectPath, inspectSubjectReadiness, runSubjectProcess, type SubjectProcessObserver} from '@nazare/wind-tunnel-subject-manager';
-import {normalizePiJsonLine, PI_VERSION, probeProvider, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
+import {inspectPiExtensions, normalizePiJsonLine, PI_VERSION, probeProvider, runPi, type PiTimeoutReason} from '@nazare/wind-tunnel-pi';
 
 const WORKER_ID=process.env.WIND_TUNNEL_WORKER_ID??`${process.env.RAILWAY_SERVICE_NAME??'worker'}:${process.pid}:${randomUUID().slice(0,8)}`;
 const POLL_MS=Number(process.env.WIND_TUNNEL_POLL_MS??2_000);
@@ -19,25 +19,46 @@ class RunCancelledError extends Error{constructor(){super('Run cancelled');this.
 class AgentTimeoutError extends Error{constructor(reason:PiTimeoutReason,timeoutMs:number){super(`Pi timed out (${reason??'unknown'}); overall budget ${timeoutMs}ms, startup ${AGENT_STARTUP_TIMEOUT_MS}ms, idle ${AGENT_IDLE_TIMEOUT_MS}ms`);this.name='AgentTimeoutError';}}
 class PreflightError extends Error{constructor(failures:string[]){super(`Subject preflight failed: ${failures.join('; ')}`);this.name='PreflightError';}}
 class ProviderPreflightError extends Error{constructor(message:string){super(`Provider preflight failed: ${message}`);this.name='ProviderPreflightError';}}
+class BootstrapError extends Error{constructor(message:string){super(`Bootstrap failed: ${message}`);this.name='BootstrapError';}}
 class ExperimentConfigError extends Error{constructor(failures:string[]){super(`Experiment configuration invalid: ${failures.join('; ')}`);this.name='ExperimentConfigError';}}
 
 function logWorkerEvent(runId:string|null,event:string,data:Record<string,unknown>={}){
   console.log(JSON.stringify({at:new Date().toISOString(),service:'wind-tunnel-worker',workerId:WORKER_ID,runId,event,...data}));
 }
 
-function buildPrompt(task:string){
-  return ['Complete the requested repository change.','Use only the tools provided for this run.','Do not weaken tests, lint rules, policies, evidence contracts, or architectural constraints.','Leave the working checkout with the implementation applied.','','TASK:',task.trim()].join('\n');
+function buildPrompt(task:string,bootstrapContext:Array<{id:string;result:unknown}>){
+  const context=bootstrapContext.length?JSON.stringify(bootstrapContext,null,2):'No deterministic bootstrap context was configured.';
+  return [
+    'Complete the requested repository change within the fixed execution budget.',
+    'Use the pinned bootstrap context first.',
+    'Use native tool calls only; never print tool-call syntax as assistant text.',
+    'Read only files identified by context unless evidence requires expansion.',
+    'Prioritize producing the correct patch. Evaluator runs the full verification gate after you finish; run only targeted checks if time remains.',
+    'Do not weaken tests, lint rules, policies, evidence contracts, or architectural constraints.',
+    'Leave the working checkout with the implementation applied and finish immediately when the patch is complete.',
+    '',
+    'PINNED BOOTSTRAP CONTEXT:',context,'','TASK:',task.trim(),
+  ].join('\n');
 }
 const sha256=(value:string|Buffer)=>createHash('sha256').update(value).digest('hex');
+function safeSubjectPath(cwd:string,relativePath:string,label:string){
+  const absolutePath=path.resolve(cwd,relativePath);
+  if(!absolutePath.startsWith(`${path.resolve(cwd)}${path.sep}`))throw new ExperimentConfigError([`${label} must stay inside subject repository: ${relativePath}`]);
+  return absolutePath;
+}
 async function resolveToolEnvironment(cwd:string,config:ToolConfig){
   const extensions=[];
   for(const relativePath of config.extensions){
-    const absolutePath=path.resolve(cwd,relativePath);
-    if(!absolutePath.startsWith(`${path.resolve(cwd)}${path.sep}`))throw new ExperimentConfigError([`tool extension must stay inside subject repository: ${relativePath}`]);
+    const absolutePath=safeSubjectPath(cwd,relativePath,'tool extension');
     const content=await readFile(absolutePath);
     extensions.push({path:relativePath,absolutePath,sha256:sha256(content)});
   }
-  return {allow:config.allow,extensions};
+  const bootstrap=[];
+  for(const item of config.bootstrap){
+    const absolutePath=safeSubjectPath(cwd,item.entrypoint,'bootstrap entrypoint');
+    bootstrap.push({...item,absolutePath,sha256:sha256(await readFile(absolutePath))});
+  }
+  return {allow:config.allow,extensions,bootstrap};
 }
 async function assertNotCancelled(runId:string){if(await isCancellationRequested(runId))throw new RunCancelledError();}
 async function verify(cwd:string,checks:VerificationSpec[],runId:string,observer?:SubjectProcessObserver){
@@ -52,6 +73,34 @@ async function verify(cwd:string,checks:VerificationSpec[],runId:string,observer
   }
   return {results,stdout,stderr};
 }
+async function runBootstrap(input:{cwd:string;repository:string;sourceSha:string;task:string;runId:string;entries:Array<{id:string;entrypoint:string;absolutePath:string;sha256:string;timeoutMs:number;maxOutputBytes:number;required:boolean}>;observer?:SubjectProcessObserver}){
+  const contexts:Array<{id:string;result:unknown}>=[];
+  for(const entry of input.entries){
+    const startedAt=new Date().toISOString();
+    await appendEvent({runId:input.runId,type:'bootstrap.started',at:startedAt,data:{id:entry.id,entrypoint:entry.entrypoint,sha256:entry.sha256,timeoutMs:entry.timeoutMs,maxOutputBytes:entry.maxOutputBytes}});
+    const payload=JSON.stringify({task:input.task,repository:input.repository,sourceSha:input.sourceSha});
+    const result=await runSubjectProcess('pnpm',['exec','tsx',entry.absolutePath],input.cwd,entry.timeoutMs,input.observer,payload).catch(error=>({exitCode:null,stdout:'',stderr:error instanceof Error?error.message:String(error),stdoutBytes:0,stderrBytes:0,durationMs:0,timedOut:false}));
+    const failure=result.timedOut?`timed out after ${entry.timeoutMs}ms`:result.exitCode!==0?result.stderr||result.stdout||`exit ${result.exitCode}`:result.stdoutBytes>entry.maxOutputBytes?`output exceeded ${entry.maxOutputBytes} bytes`:null;
+    if(failure){
+      await appendEvent({runId:input.runId,type:'bootstrap.failed',at:new Date().toISOString(),data:{id:entry.id,durationMs:result.durationMs,required:entry.required,error:failure.slice(0,2_000)}});
+      await putArtifact({runId:input.runId,type:'bootstrap.stderr',name:`${entry.id}.stderr.log`,mediaType:'text/plain',content:result.stderr});
+      if(entry.required)throw new BootstrapError(`${entry.id}: ${failure}`);
+      continue;
+    }
+    let parsed:unknown;
+    try{parsed=JSON.parse(result.stdout);}catch(error){
+      const failure=`invalid JSON output: ${error instanceof Error?error.message:String(error)}`;
+      await appendEvent({runId:input.runId,type:'bootstrap.failed',at:new Date().toISOString(),data:{id:entry.id,durationMs:result.durationMs,required:entry.required,error:failure}});
+      if(entry.required)throw new BootstrapError(`${entry.id}: ${failure}`);
+      continue;
+    }
+    contexts.push({id:entry.id,result:parsed});
+    await putArtifact({runId:input.runId,type:'bootstrap.context',name:`${entry.id}.json`,mediaType:'application/json',content:JSON.stringify(parsed,null,2)});
+    await appendEvent({runId:input.runId,type:'bootstrap.completed',at:new Date().toISOString(),data:{id:entry.id,durationMs:result.durationMs,outputBytes:result.stdoutBytes,inputSha256:sha256(payload),outputSha256:sha256(result.stdout)}});
+  }
+  return contexts;
+}
+
 async function captureWorkingTree(cwd:string,sourceSha:string,runId:string,partial:boolean,observer?:SubjectProcessObserver){
   const intent=await runSubjectProcess('git',['add','--intent-to-add','--all'],cwd,60_000,observer);
   if(intent.exitCode!==0||intent.timedOut)throw new Error(`Could not enumerate workspace changes: ${intent.stderr}`);
@@ -83,12 +132,18 @@ async function executeRun(claimed:RunState){
     deltaBatches.clear();
   };
   const toolStarts=new Map<string,number>();
+  let assistantSyntaxTail='';let malformedToolSyntaxObserved=false;
   const enqueueSemanticEvent=(type:string,data:Record<string,unknown>={})=>{
     if(type==='agent.message.update'||type==='agent.pi'||type==='agent.tool.update')return;
     const toolCallId=typeof data.toolCallId==='string'?data.toolCallId:null;
     if(type==='agent.tool.started'&&toolCallId)toolStarts.set(toolCallId,Date.now());
     if(type==='agent.tool.completed'&&toolCallId){const started=toolStarts.get(toolCallId);if(started)data.durationMs=Date.now()-started;toolStarts.delete(toolCallId);}
     if(type!=='agent.thinking.delta'&&type!=='agent.message.delta'){flushDeltas();enqueueEvent(type,data);return;}
+    if(type==='agent.message.delta'){
+      const text=String(data.text??'');const combined=assistantSyntaxTail+text;
+      if(!malformedToolSyntaxObserved&&/(?:to=functions[./]|<\|channel\|>.*functions\.)/.test(combined)){malformedToolSyntaxObserved=true;enqueueEvent('agent.tool.malformed',{sample:combined.slice(-256)});}
+      assistantSyntaxTail=combined.slice(-128);
+    }
     const key=`${type}:${String(data.role??'')}:${String(data.contentIndex??'')}`;
     const existing=deltaBatches.get(key);const text=String(data.text??'');
     if(existing)existing.text+=text;else deltaBatches.set(key,{type,data:{...data,text:undefined},text,at:new Date().toISOString()});
@@ -114,8 +169,14 @@ async function executeRun(claimed:RunState){
     const resolvedAgent=resolveExperimentAgent(definition);
     const resolvedTools=resolveExperimentTools(definition);
     const toolEnvironment=await resolveToolEnvironment(cwd,resolvedTools);
+    const inspectedTools=await inspectPiExtensions(toolEnvironment.extensions).catch(error=>{throw new ExperimentConfigError([`tool extension load failed: ${error instanceof Error?error.message:String(error)}`]);});
+    const builtinTools=new Set(['read','bash','edit','write']);
+    const inspectedByName=new Map(inspectedTools.map(tool=>[tool.name,tool]));
+    const missingTools=toolEnvironment.allow.filter(name=>!builtinTools.has(name)&&!inspectedByName.has(name));
+    if(missingTools.length)throw new ExperimentConfigError([`allowlisted tools were not registered: ${missingTools.join(', ')}`]);
     state=await saveRun({...state,spec:{...state.spec,agent:resolvedAgent,tools:resolvedTools}});
     await observedEvent('experiment.resolved',{id:definition.id,agent:resolvedAgent,tools:resolvedTools,verificationChecks:definition.verification.length});
+    await observedEvent('tools.inspected',{enabled:toolEnvironment.allow.length,custom:inspectedTools.length,extensions:toolEnvironment.extensions.length});
 
     const taskPath=path.resolve(cwd,definition.taskFile);
     if(!taskPath.startsWith(`${path.resolve(cwd)}${path.sep}`))throw new ExperimentConfigError(['taskFile must stay inside subject repository']);
@@ -137,10 +198,17 @@ async function executeRun(claimed:RunState){
     await assertNotCancelled(state.runId);
 
     await putArtifact({runId:state.runId,type:'run.spec',name:'run-spec.json',mediaType:'application/json',content:JSON.stringify(state.spec,null,2)});
-    const pinnedTools={allow:toolEnvironment.allow,extensions:toolEnvironment.extensions.map(extension=>({path:extension.path,sha256:extension.sha256}))};
+    const pinnedTools={
+      allow:toolEnvironment.allow,
+      extensions:toolEnvironment.extensions.map(extension=>({path:extension.path,sha256:extension.sha256})),
+      bootstrap:toolEnvironment.bootstrap.map(entry=>({id:entry.id,entrypoint:entry.entrypoint,sha256:entry.sha256,timeoutMs:entry.timeoutMs,maxOutputBytes:entry.maxOutputBytes,required:entry.required})),
+      effective:toolEnvironment.allow.map(name=>builtinTools.has(name)?{name,source:'pi-builtin',piVersion:PI_VERSION}:{...inspectedByName.get(name),source:'extension'}),
+    };
     await putArtifact({runId:state.runId,type:'agent.tool-manifest',name:'tool-manifest.json',mediaType:'application/json',content:JSON.stringify(pinnedTools,null,2)});
+    const bootstrapContext=await runBootstrap({cwd,repository,sourceSha,task,runId:state.runId,entries:toolEnvironment.bootstrap,observer:processObserver});await eventWrites;
+    await assertNotCancelled(state.runId);
 
-    const prompt=buildPrompt(task);
+    const prompt=buildPrompt(task,bootstrapContext);
     const agentTimeoutMs=Math.min(MAX_AGENT_TIMEOUT_MS,Math.max(30_000,resolvedAgent.timeoutMs));
     const lockfile=await readFile(path.join(cwd,'pnpm-lock.yaml'));
     await putArtifact({runId:state.runId,type:'run.environment',name:'environment.json',mediaType:'application/json',content:JSON.stringify({runner:{commitSha:process.env.RAILWAY_GIT_COMMIT_SHA??null,deploymentId:process.env.RAILWAY_DEPLOYMENT_ID??null,node:process.versions.node,pi:PI_VERSION,pnpm:'10.17.1'},subject:{repository,sourceSha,lockfileSha256:sha256(lockfile)},agent:{...resolvedAgent,effectiveTimeoutMs:agentTimeoutMs},tools:pinnedTools,promptSha256:sha256(prompt)},null,2)});
@@ -201,7 +269,7 @@ async function executeRun(claimed:RunState){
     if(!workspaceCaptured){await captureWorkingTree(cwd,sourceSha,state.runId,true,processObserver).then(()=>{workspaceCaptured=true;}).catch(captureError=>logWorkerEvent(state.runId,'workspace.capture.failed',{error:captureError instanceof Error?captureError.message:String(captureError)}));await eventWrites;}
     const finishedAt=new Date().toISOString();const cancelled=error instanceof RunCancelledError||await isCancellationRequested(state.runId).catch(()=>false);
     if(cancelled){state=await saveRun({...state,status:'cancelled',outcome:null,error:null,errorCode:null,finishedAt});logWorkerEvent(state.runId,'run.cancelled');await appendEvent({runId:state.runId,type:'run.cancelled',at:finishedAt,data:{workerId:WORKER_ID}}).catch(()=>{});}
-    else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ProviderPreflightError?'provider_preflight_failed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
+    else{const message=error instanceof Error?error.stack??error.message:String(error);const errorCode=error instanceof AgentTimeoutError?'agent_timeout':error instanceof PreflightError?'preflight_failed':error instanceof ProviderPreflightError?'provider_preflight_failed':error instanceof BootstrapError?'bootstrap_failed':error instanceof ExperimentConfigError?'experiment_invalid':'run_error';state=await saveRun({...state,status:'failed',outcome:null,error:message,errorCode,finishedAt});logWorkerEvent(state.runId,'run.failed',{error:message,errorCode});await putArtifact({runId:state.runId,type:'run.error',name:'error.txt',mediaType:'text/plain',content:message}).catch(()=>{});await appendEvent({runId:state.runId,type:'run.failed',at:finishedAt,data:{error:message,errorCode}}).catch(()=>{});}
   }finally{clearInterval(heartbeat);flushDeltas();await eventWrites;await cleanSubject(repository).catch(error=>logWorkerEvent(state.runId,'subject.cleanup.failed',{error:error instanceof Error?error.message:String(error)}));}
 }
 

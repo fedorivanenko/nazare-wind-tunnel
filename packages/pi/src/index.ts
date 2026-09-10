@@ -3,6 +3,7 @@ import {randomUUID} from 'node:crypto';
 import {mkdir, readFile, rm} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import {pathToFileURL} from 'node:url';
 
 export type PiRunOptions = {
   cwd: string;
@@ -69,6 +70,26 @@ export type PiSemanticEvent = {
   type: string;
   data?: Record<string, unknown>;
 };
+
+export type InspectedTool = {name:string;label:string|null;description:string|null;promptSnippet:string|null;parameters:unknown;extension:string};
+
+export async function inspectPiExtensions(extensions:Array<{path:string;absolutePath:string;sha256:string}>):Promise<InspectedTool[]> {
+  const tools:InspectedTool[]=[];
+  const names=new Set<string>();
+  for(const extension of extensions){
+    const loaded=await import(`${pathToFileURL(extension.absolutePath).href}?sha256=${extension.sha256}`) as {default?:unknown};
+    if(typeof loaded.default!=='function')throw new Error(`Pi extension must export a default registration function: ${extension.path}`);
+    const api=new Proxy({registerTool:(definition:unknown)=>{
+      if(!definition||typeof definition!=='object')throw new Error(`Pi extension registered an invalid tool: ${extension.path}`);
+      const tool=definition as Record<string,unknown>;const name=String(tool.name??'').trim();
+      if(!name)throw new Error(`Pi extension registered a tool without a name: ${extension.path}`);
+      if(names.has(name))throw new Error(`Duplicate Pi tool registration: ${name}`);
+      names.add(name);tools.push({name,label:typeof tool.label==='string'?tool.label:null,description:typeof tool.description==='string'?tool.description:null,promptSnippet:typeof tool.promptSnippet==='string'?tool.promptSnippet:null,parameters:tool.parameters??null,extension:extension.path});
+    }},{get:(target,property)=>property in target?target[property as keyof typeof target]:()=>undefined});
+    await (loaded.default as (api:unknown)=>unknown)(api);
+  }
+  return tools;
+}
 
 function textFromContent(value: unknown): string {
   if (typeof value === 'string') return value;
