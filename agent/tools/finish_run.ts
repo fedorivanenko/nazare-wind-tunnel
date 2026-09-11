@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { defineTool, type ToolContext } from "eve/tools";
 import { z } from "zod";
 import { preparedRun } from "../lib/run-state";
-import { bounded, REPOSITORY_ROOT, shellQuote } from "../lib/subject";
+import { bounded, shellQuote } from "../lib/subject";
 
 const PROTECTED_PATHS = [".git", ".wind-tunnel", ".github"];
 const GENERATED_SEGMENTS = new Set([
@@ -31,9 +31,10 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	if (!prepared) throw new Error("Run preparation is incomplete");
 	const modelPhaseEndedAt = new Date().toISOString();
 	const sandbox = await ctx.getSandbox();
+	const root = shellQuote(prepared.repositoryRoot);
 
 	const diff = await sandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && git diff --binary --no-ext-diff ${shellQuote(prepared.sourceSha)} --`,
+		command: `cd ${root} && git diff --binary --no-ext-diff ${shellQuote(prepared.sourceSha)} --`,
 	});
 	if (diff.exitCode !== 0)
 		throw new Error(
@@ -41,7 +42,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		);
 
 	const names = await sandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && git diff --name-only ${shellQuote(prepared.sourceSha)} --`,
+		command: `cd ${root} && git diff --name-only ${shellQuote(prepared.sourceSha)} --`,
 	});
 	if (names.exitCode !== 0) throw new Error("Changed-file capture failed");
 	const changedFiles = names.stdout
@@ -65,7 +66,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	for (const command of prepared.verifyCommands) {
 		const started = Date.now();
 		const result = await sandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && timeout 240s bash -lc ${shellQuote(command)}`,
+			command: `cd ${root} && timeout 240s bash -lc ${shellQuote(command)}`,
 		});
 		checks.push({
 			command,
@@ -77,8 +78,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		});
 	}
 	const passed = checks.every((check) => check.passed);
-
-	return {
+	const result = {
 		passed,
 		changedFiles,
 		checks,
@@ -96,11 +96,16 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		},
 		verificationIsolation: "same-worktree",
 	};
+
+	await sandbox.run({
+		command: `git --git-dir=/workspace/source.git worktree remove --force ${root} || true`,
+	});
+	return result;
 }
 
 export default defineTool({
 	description:
-		"Capture the git diff, run the task's deterministic verification commands, and finish the run. Call exactly once after implementation.",
+		"Capture the git diff, run the task's deterministic verification commands, clean the disposable worktree, and finish the run. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Capture diff and verify" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
