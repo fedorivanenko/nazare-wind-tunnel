@@ -94,8 +94,10 @@ export default defineChannel<RunChannelState>({
 					{ status: 200 },
 				);
 
-			const repositoryRoot = `/workspace/runs/${run.id}`;
-			const session = await from(input.workspaceId).send(
+			const repositoryRoot = "/workspace/repo";
+			const workspace = from(input.repository);
+			await workspace.clear();
+			const session = await workspace.send(
 				[
 					`Mutation run ${run.id}`,
 					`Source: ${input.repository}@${input.sourceSha}`,
@@ -111,7 +113,7 @@ export default defineChannel<RunChannelState>({
 						principalType: "service",
 						attributes: {
 							runId: run.id,
-							workspaceId: input.workspaceId,
+							workspaceId: input.repository,
 							repository: input.repository,
 							sourceSha: input.sourceSha,
 							taskJson,
@@ -119,7 +121,7 @@ export default defineChannel<RunChannelState>({
 					},
 					state: {
 						runId: run.id,
-						workspaceId: input.workspaceId,
+						workspaceId: input.repository,
 						repository: input.repository,
 						sourceSha: input.sourceSha,
 					},
@@ -130,7 +132,7 @@ export default defineChannel<RunChannelState>({
 				{
 					runId: run.id,
 					sessionId: session.id,
-					workspaceId: input.workspaceId,
+					workspaceId: input.repository,
 					taskSha256,
 				},
 				{ status: 202 },

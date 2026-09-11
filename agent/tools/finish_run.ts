@@ -66,7 +66,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 	for (const command of prepared.verifyCommands) {
 		const started = Date.now();
 		const result = await sandbox.run({
-			command: `cd ${root} && timeout 240s bash -lc ${shellQuote(command)}`,
+			command: `cd ${root} && CI=1 timeout 240s bash -lc ${shellQuote(command)}`,
 		});
 		checks.push({
 			command,
@@ -97,15 +97,12 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		verificationIsolation: "same-worktree",
 	};
 
-	await sandbox.run({
-		command: `git --git-dir=/workspace/source.git worktree remove --force ${root} || true`,
-	});
 	return result;
 }
 
 export default defineTool({
 	description:
-		"Capture the git diff, run the task's deterministic verification commands, clean the disposable worktree, and finish the run. Call exactly once after implementation.",
+		"Capture the git diff and run the task's deterministic verification commands. Call exactly once after implementation.",
 	inputSchema: z.object({}),
 	label: { start: () => "Capture diff and verify" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),

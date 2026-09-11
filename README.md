@@ -1,6 +1,6 @@
 # Nazare Wind Tunnel
 
-Nazare Wind Tunnel runs exact private source snapshots through an eve coding agent in hardware-isolated Vercel Sandboxes.
+Nazare Wind Tunnel runs exact source revisions through an eve coding agent in hardware-isolated, repository-scoped Vercel Sandboxes.
 
 ## Production architecture
 
@@ -11,8 +11,7 @@ GitHub pull request
         v
 GitHub Action
   - resolves exact PR SHA
-  - validates experiment
-  - creates credential-free git archive
+  - validates task spec
         |
         v
 Wind Tunnel run API + PostgreSQL registry
@@ -20,8 +19,9 @@ Wind Tunnel run API + PostgreSQL registry
         v
 Vercel eve Workflow
         |
-        +-- mutation sandbox: target preparation, dynamic tools, model edits
-        +-- fresh verification sandbox: captured patch + untouched evaluator
+        +-- one durable session and sandbox per repository
+        +-- persistent source mirror, checkout, and keyed preparation cache
+        +-- model edits and deterministic verification
         +-- PostgreSQL event mirror: runs, model activity, tools, evidence
 ```
 
@@ -29,20 +29,19 @@ Vercel is the only runtime. The former Railway API, worker, PostgreSQL queue, st
 
 ## Security boundary
 
-GitHub Action checks out exact candidate SHA and uploads `source.tar.gz` as eve attachment. Sandbox receives candidate archive only. It receives no GitHub, Vercel, control-plane, database, or object-storage credentials.
+GitHub Action sends exact candidate repository and SHA. Repository continuation identity is the repository slug, so later tasks reuse the same durable eve session and Vercel Sandbox. Sandbox receives no GitHub, Vercel, control-plane, database, or object-storage credentials; source repositories must therefore be publicly cloneable until credential brokering is configured.
 
 Inside sandbox:
 
-1. A preflight hook extracts archive into `/workspace/repo` before model execution.
-2. It initializes credential-free local Git baseline.
-3. It installs dependencies with pinned pnpm `10.17.1`.
-4. Network changes to `deny-all` before subject bootstrap/model execution.
-5. Target-owned tool manifests are validated and exposed dynamically by eve.
-6. Agent mutates candidate.
-7. `finish_run` captures the binary patch and destroys the mutation sandbox.
-8. A fresh sandbox rematerializes exact source, applies only the captured patch, and runs the untouched evaluator.
+1. A preflight hook fetches exact SHA into persistent `/workspace/source.git`.
+2. It resets persistent `/workspace/repo` to that immutable baseline.
+3. It runs task preparation only when repository, SHA, or preparation commands change.
+4. Network changes to `deny-all` before model execution.
+5. Agent mutates candidate.
+6. `finish_run` captures binary patch and runs deterministic verification in same checkout.
+7. Next task clears model context and resets checkout while preserving sandbox and prepared dependencies.
 
-No clone, fetch, push, or golden reference occurs in agent sandbox.
+Agent cannot push or access credentials.
 
 ## eve agent
 
@@ -179,7 +178,7 @@ From GitHub Actions, run **Run eve Wind Tunnel** with:
 
 ```text
 pr=<same-repository PR number>
-experiment=experiments/luna-operability/experiment-02-marketing-consent.json
+task=experiments/luna-operability/task-02-marketing-consent.json
 ```
 
 Workflow uploads redacted eve NDJSON events plus compact result JSON as private GitHub Actions artifacts.
