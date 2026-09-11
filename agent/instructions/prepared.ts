@@ -3,7 +3,7 @@ import { preparedRun } from "../lib/run-state";
 
 export default defineDynamic({
 	events: {
-		"session.started": async () => {
+		"turn.started": async () => {
 			const prepared = preparedRun.get();
 			if (!prepared) return null;
 			const mutationBoundary = prepared.mutationPaths.length
@@ -13,10 +13,9 @@ export default defineDynamic({
 				role: "user",
 				content: [
 					`Task:\n${prepared.task}`,
-					"Repository root: /workspace/repo",
+					`Repository root: ${prepared.repositoryRoot}`,
 					mutationBoundary,
-					`Bootstrap context:\n${JSON.stringify(prepared.bootstrap)}`,
-					`Hard execution budget: ${prepared.modelTimeoutMs}ms and at most ${prepared.maxToolCalls} exploratory/editing tool calls before finish_run. The bootstrap context is the primary source of truth; do not rediscover information already present there.`,
+					`Hard execution budget: ${prepared.modelTimeoutMs}ms and at most ${prepared.maxToolCalls} exploratory/editing tool calls before finish_run.`,
 					"Implement the smallest valid change immediately. Prefer direct edits over repository exploration. Call finish_run exactly once when the patch is ready.",
 				].join("\n\n"),
 			});
