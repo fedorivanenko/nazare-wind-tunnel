@@ -3,18 +3,20 @@ import { prepareRun } from "../lib/prepare";
 
 export default defineHook({
 	events: {
-		async "session.started"(_event, ctx) {
-			const attributes = ctx.session.auth.initiator?.attributes;
+		async "turn.started"(_event, ctx) {
+			const attributes = ctx.session.auth.current?.attributes;
+			const runId = attributes?.runId;
 			const repository = attributes?.repository;
 			const sourceSha = attributes?.sourceSha;
 			const task = attributes?.task;
 			if (
+				typeof runId !== "string" ||
 				typeof repository !== "string" ||
 				typeof sourceSha !== "string" ||
 				!task
 			)
 				return;
-			await prepareRun({ repository, sourceSha, task }, ctx);
+			await prepareRun({ runId, repository, sourceSha, task }, ctx);
 		},
 	},
 });
