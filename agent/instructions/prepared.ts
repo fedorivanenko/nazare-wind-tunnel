@@ -1,22 +1,40 @@
 import { defineDynamic, defineInstructions } from "eve/instructions";
-import { preparedRun } from "../lib/run-state";
 
 export default defineDynamic({
 	events: {
-		"session.started": async () => {
-			const prepared = preparedRun.get();
-			if (!prepared) return null;
-			const mutationBoundary = prepared.mutationPaths.length
-				? `Compiled mutation boundary (hard-enforced):\n${prepared.mutationPaths.join("\n")}`
-				: "Compiled mutation boundary: none declared; repository safety rules still apply.";
+		"turn.started": async (_event, ctx) => {
+			const attributes = ctx.session.auth.current?.attributes;
+			const runId = attributes?.runId;
+			const taskJson = attributes?.taskJson;
+			if (typeof runId !== "string" || typeof taskJson !== "string")
+				return null;
+			let task: unknown;
+			try {
+				task = JSON.parse(taskJson);
+			} catch {
+				return null;
+			}
+			if (!task || typeof task !== "object") return null;
+			const agent = (
+				task as {
+					agent?: {
+						prompt?: unknown;
+						timeoutMs?: unknown;
+						maxToolCalls?: unknown;
+					};
+				}
+			).agent;
+			if (!agent || typeof agent.prompt !== "string") return null;
+			const timeoutMs =
+				typeof agent.timeoutMs === "number" ? agent.timeoutMs : 60_000;
+			const maxToolCalls =
+				typeof agent.maxToolCalls === "number" ? agent.maxToolCalls : 12;
 			return defineInstructions({
 				role: "user",
 				content: [
-					`Task:\n${prepared.task}`,
-					"Repository root: /workspace/repo",
-					mutationBoundary,
-					`Bootstrap context:\n${JSON.stringify(prepared.bootstrap)}`,
-					`Hard execution budget: ${prepared.modelTimeoutMs}ms and at most ${prepared.maxToolCalls} exploratory/editing tool calls before finish_run. The bootstrap context is the primary source of truth; do not rediscover information already present there.`,
+					`Task:\n${agent.prompt}`,
+					`Repository root: /workspace/runs/${runId}`,
+					`Hard execution budget: ${timeoutMs}ms and at most ${maxToolCalls} exploratory/editing tool calls before finish_run.`,
 					"Implement the smallest valid change immediately. Prefer direct edits over repository exploration. Call finish_run exactly once when the patch is ready.",
 				].join("\n\n"),
 			});

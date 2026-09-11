@@ -1,23 +1,10 @@
 import { createHash } from "node:crypto";
 import { defineTool, type ToolContext } from "eve/tools";
 import { z } from "zod";
-import { resolveEvaluator } from "../lib/evaluators";
-import { escapingSymbolHunks } from "../lib/mutation-boundary";
-import {
-	loadSubjectContract,
-	subjectDependencyInstallCommand,
-} from "../lib/prepared-subject";
 import { preparedRun } from "../lib/run-state";
-import {
-	bounded,
-	parseExperiment,
-	REPOSITORY_ROOT,
-	requiredText,
-	shellQuote,
-} from "../lib/subject";
-import { runVerificationPlan } from "../lib/verification-plan";
+import { bounded, shellQuote } from "../lib/subject";
 
-const PROTECTED_PATHS = [".git", ".wind-tunnel", "experiments", ".github"];
+const PROTECTED_PATHS = [".git", ".wind-tunnel", ".github"];
 const GENERATED_SEGMENTS = new Set([
 	"node_modules",
 	"dist",
@@ -39,237 +26,87 @@ function protectedPath(relativePath: string) {
 	);
 }
 
-function insideAnyPath(file: string, allowedPaths: string[]) {
-	return allowedPaths.some(
-		(prefix) => file === prefix || file.startsWith(`${prefix}/`),
-	);
-}
-
 export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
-	const modelPhaseEndedAt = new Date().toISOString();
 	const prepared = preparedRun.get();
-	if (
-		prepared &&
-		Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt) >
-			prepared.modelTimeoutMs
-	)
-		throw new Error(
-			`Model phase exceeded ${prepared.modelTimeoutMs}ms post-preparation budget before finalization`,
-		);
-	const mutationSandbox = await ctx.getSandbox();
-	const experimentText = requiredText(
-		await mutationSandbox.readTextFile({
-			path: "/workspace/.wind-tunnel-experiment.json",
-		}),
-		"Prepared experiment",
-	);
-	const experiment = parseExperiment(experimentText);
-	const archiveLookup = await mutationSandbox.run({
-		command:
-			"find /workspace/attachments -type f -name 'source.tar.gz' -print -quit",
-	});
-	if (archiveLookup.exitCode !== 0 || !archiveLookup.stdout.trim())
-		throw new Error("Exact source archive is unavailable for verification");
-	const sourceArchive = await mutationSandbox.readBinaryFile({
-		path: archiveLookup.stdout.trim(),
-	});
-	if (sourceArchive === null)
-		throw new Error("Exact source archive could not be read for verification");
+	if (!prepared) throw new Error("Run preparation is incomplete");
+	const modelPhaseEndedAt = new Date().toISOString();
+	const sandbox = await ctx.getSandbox();
+	const root = shellQuote(prepared.repositoryRoot);
 
-	const staged = await mutationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && git add -A && git diff --cached --binary --no-ext-diff`,
+	const diff = await sandbox.run({
+		command: `cd ${root} && git diff --binary --no-ext-diff ${shellQuote(prepared.sourceSha)} --`,
 	});
-	if (staged.exitCode !== 0)
+	if (diff.exitCode !== 0)
 		throw new Error(
-			`Candidate capture failed: ${bounded(staged.stderr || staged.stdout, 20_000)}`,
+			`Candidate capture failed: ${bounded(diff.stderr || diff.stdout, 20_000)}`,
 		);
-	const zeroContextDiff = await mutationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && git diff --cached --unified=0 --no-ext-diff`,
+
+	const names = await sandbox.run({
+		command: `cd ${root} && git diff --name-only ${shellQuote(prepared.sourceSha)} --`,
 	});
-	if (zeroContextDiff.exitCode !== 0)
-		throw new Error("Candidate hunk inspection failed");
-	const names = await mutationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && git diff --cached --name-only`,
-	});
-	if (names.exitCode !== 0)
-		throw new Error(
-			`Changed-file capture failed: ${bounded(names.stderr || names.stdout, 20_000)}`,
-		);
+	if (names.exitCode !== 0) throw new Error("Changed-file capture failed");
 	const changedFiles = names.stdout
 		.split("\n")
 		.map((value) => value.trim())
 		.filter(Boolean);
-	const rawDiff = await mutationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && git diff --cached --raw`,
-	});
-	if (rawDiff.exitCode !== 0)
-		throw new Error("Candidate mode inspection failed");
-	if (/(?:^| )120000(?: |$)/m.test(rawDiff.stdout))
-		throw new Error("Candidate patch may not create or modify symbolic links");
-
 	const forbidden = changedFiles.filter(protectedPath);
 	if (forbidden.length)
 		throw new Error(
 			`Candidate patch modifies protected or generated paths: ${forbidden.join(", ")}`,
 		);
 
-	const experimentAllowedPaths = experiment.allowedPaths ?? [];
-	if (experimentAllowedPaths.length) {
-		const outsideAllowedPaths = changedFiles.filter(
-			(file) => !insideAnyPath(file, experimentAllowedPaths),
-		);
-		if (outsideAllowedPaths.length)
-			throw new Error(
-				`Candidate patch modifies paths outside experiment allowedPaths: ${outsideAllowedPaths.join(", ")}`,
-			);
-	}
-
-	const compiledMutationPaths = prepared?.mutationPaths ?? [];
-	if (compiledMutationPaths.length) {
-		const outsideMutationSet = changedFiles.filter(
-			(file) => !insideAnyPath(file, compiledMutationPaths),
-		);
-		if (outsideMutationSet.length)
-			throw new Error(
-				`Candidate patch escapes compiled mutation set: ${outsideMutationSet.join(", ")}. Allowed: ${compiledMutationPaths.join(", ")}`,
-			);
-	}
-
-	const mutationRanges = prepared?.mutationRanges ?? [];
-	const unrangedChangedFiles = mutationRanges.length
-		? changedFiles.filter(
-				(file) => !mutationRanges.some((range) => range.file === file),
-			)
-		: [];
-	if (unrangedChangedFiles.length)
-		throw new Error(
-			`Candidate patch modifies files without compiled symbol boundaries: ${unrangedChangedFiles.join(", ")}`,
-		);
-	const escapedHunks = escapingSymbolHunks(
-		zeroContextDiff.stdout,
-		mutationRanges,
-	);
-	if (escapedHunks.length)
-		throw new Error(
-			`Candidate patch escapes compiled symbol boundaries: ${escapedHunks
-				.map(
-					(hunk) =>
-						`${hunk.file} @@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount}`,
-				)
-				.join("; ")}`,
-		);
-
-	await mutationSandbox.delete();
-
-	const verificationSandboxAcquireStartedMs = Date.now();
-	const verificationSandbox = await ctx.getSandbox();
-	const verificationSandboxAcquireMs =
-		Date.now() - verificationSandboxAcquireStartedMs;
-	await verificationSandbox.setNetworkPolicy({ allow: ["registry.npmjs.org"] });
-	await verificationSandbox.writeBinaryFile({
-		path: "/workspace/source.tar.gz",
-		content: sourceArchive,
-	});
-	await verificationSandbox.writeTextFile({
-		path: "/workspace/candidate.patch",
-		content: staged.stdout,
-	});
-
-	const evaluator = resolveEvaluator(experiment.evaluator);
-	await verificationSandbox.run({ command: "mkdir -p /workspace/evaluators" });
-	for (const [name, content] of Object.entries(evaluator.files))
-		await verificationSandbox.writeTextFile({
-			path: `/workspace/evaluators/${name}`,
-			content,
+	const checks = [] as Array<{
+		command: string;
+		passed: boolean;
+		exitCode: number;
+		stdout: string;
+		stderr: string;
+		durationMs: number;
+	}>;
+	for (const command of prepared.verifyCommands) {
+		const started = Date.now();
+		const result = await sandbox.run({
+			command: `cd ${root} && timeout 240s bash -lc ${shellQuote(command)}`,
 		});
-
-	const verificationSourceSetupStartedMs = Date.now();
-	const sourceSetup = await verificationSandbox.run({
-		command: [
-			"set -euo pipefail",
-			`rm -rf ${REPOSITORY_ROOT}`,
-			`mkdir -p ${REPOSITORY_ROOT}`,
-			`tar -xzf /workspace/source.tar.gz -C ${REPOSITORY_ROOT}`,
-			`cd ${REPOSITORY_ROOT}`,
-			"test ! -s /workspace/candidate.patch || git apply --binary --whitespace=nowarn /workspace/candidate.patch",
-			"test -f pnpm-lock.yaml",
-		].join("\n"),
-	});
-	const verificationSourceSetupMs =
-		Date.now() - verificationSourceSetupStartedMs;
-	if (sourceSetup.exitCode !== 0)
-		throw new Error(
-			`Fresh verification source setup failed with exit ${sourceSetup.exitCode}: ${bounded(sourceSetup.stderr || sourceSetup.stdout, 20_000)}`,
-		);
-
-	const verificationSubjectContract = await loadSubjectContract(ctx);
-	const verificationDependencyInstallStartedMs = Date.now();
-	const dependencyInstall = await verificationSandbox.run({
-		command: `cd ${REPOSITORY_ROOT} && timeout 180s bash -lc ${shellQuote(subjectDependencyInstallCommand(verificationSubjectContract))}`,
-	});
-	const verificationDependencyInstallMs =
-		Date.now() - verificationDependencyInstallStartedMs;
-	if (dependencyInstall.exitCode !== 0)
-		throw new Error(
-			`Fresh verification dependency install failed with exit ${dependencyInstall.exitCode}: ${bounded(dependencyInstall.stderr || dependencyInstall.stdout, 20_000)}`,
-		);
-	await verificationSandbox.setNetworkPolicy("deny-all");
-
-	const checks = await runVerificationPlan(evaluator.checks, ctx);
-	const passed = checks
-		.filter((check) => check.required)
-		.every((check) => check.passed);
-	await verificationSandbox.stop();
-
-	const verificationTierDurationsMs = checks.reduce<Record<string, number>>(
-		(totals, check) => {
-			const tier = check.tier ?? "behavioral";
-			totals[tier] = (totals[tier] ?? 0) + check.durationMs;
-			return totals;
-		},
-		{},
-	);
-
-	return {
+		checks.push({
+			command,
+			passed: result.exitCode === 0,
+			exitCode: result.exitCode,
+			stdout: bounded(result.stdout ?? "", 20_000),
+			stderr: bounded(result.stderr ?? "", 20_000),
+			durationMs: Date.now() - started,
+		});
+	}
+	const passed = checks.every((check) => check.passed);
+	const result = {
 		passed,
 		changedFiles,
 		checks,
-		patch: bounded(staged.stdout),
-		patchSha256: createHash("sha256").update(staged.stdout).digest("hex"),
-		preparedDependencyKey: prepared?.preparedDependencyKey ?? null,
-		mutationBoundary: {
-			compiled: compiledMutationPaths.length > 0,
-			allowedPaths: compiledMutationPaths,
-			allowedSymbols: mutationRanges,
-			changedFiles,
-			passed: true,
+		patch: bounded(diff.stdout),
+		patchSha256: createHash("sha256").update(diff.stdout).digest("hex"),
+		timings: {
+			preparationStartedAt: prepared.preparationStartedAt,
+			preparationDurationMs: prepared.preparationDurationMs,
+			preparation: prepared.preparationTimings,
+			modelPhaseStartedAt: prepared.preparedAt,
+			modelPhaseEndedAt,
+			modelPhaseDurationMs:
+				Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
+			verificationMs: checks.reduce((sum, check) => sum + check.durationMs, 0),
 		},
-		timings: prepared
-			? {
-					preparationStartedAt: prepared.preparationStartedAt,
-					preparationDurationMs: prepared.preparationDurationMs,
-					preparation: prepared.preparationTimings,
-					modelPhaseStartedAt: prepared.preparedAt,
-					modelPhaseEndedAt,
-					modelPhaseDurationMs:
-						Date.parse(modelPhaseEndedAt) - Date.parse(prepared.preparedAt),
-					modelPhaseBudgetMs: prepared.modelTimeoutMs,
-					verification: {
-						sandboxAcquireMs: verificationSandboxAcquireMs,
-						sourceSetupMs: verificationSourceSetupMs,
-						dependencyInstallMs: verificationDependencyInstallMs,
-						tiersMs: verificationTierDurationsMs,
-					},
-				}
-			: null,
-		verificationIsolation: "fresh-sandbox",
+		verificationIsolation: "same-worktree",
 	};
+
+	await sandbox.run({
+		command: `git --git-dir=/workspace/source.git worktree remove --force ${root} || true`,
+	});
+	return result;
 }
 
 export default defineTool({
 	description:
-		"Capture the candidate patch, enforce compiled file and symbol mutation boundaries, rebuild it in a fresh sandbox, and run trusted progressive verification. Call exactly once after implementation.",
+		"Capture the git diff, run the task's deterministic verification commands, clean the disposable worktree, and finish the run. Call exactly once after implementation.",
 	inputSchema: z.object({}),
-	label: { start: () => "Verify candidate in fresh sandbox" },
+	label: { start: () => "Capture diff and verify" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
 });

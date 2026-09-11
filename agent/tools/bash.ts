@@ -13,7 +13,7 @@ export default defineTool({
 		);
 		return bash.execute(
 			{
-				command: `timeout ${(remainingMs / 1_000).toFixed(3)}s bash -lc ${shellQuote(input.command)}`,
+				command: `cd ${shellQuote(prepared.repositoryRoot)} && timeout ${(remainingMs / 1_000).toFixed(3)}s bash -lc ${shellQuote(input.command)}`,
 			},
 			ctx,
 		);
