@@ -6,7 +6,8 @@ export default defineDynamic({
 			const attributes = ctx.session.auth.current?.attributes;
 			const runId = attributes?.runId;
 			const taskJson = attributes?.taskJson;
-			if (typeof runId !== "string" || typeof taskJson !== "string") return null;
+			if (typeof runId !== "string" || typeof taskJson !== "string")
+				return null;
 			let task: unknown;
 			try {
 				task = JSON.parse(taskJson);
@@ -14,10 +15,20 @@ export default defineDynamic({
 				return null;
 			}
 			if (!task || typeof task !== "object") return null;
-			const agent = (task as { agent?: { prompt?: unknown; timeoutMs?: unknown; maxToolCalls?: unknown } }).agent;
+			const agent = (
+				task as {
+					agent?: {
+						prompt?: unknown;
+						timeoutMs?: unknown;
+						maxToolCalls?: unknown;
+					};
+				}
+			).agent;
 			if (!agent || typeof agent.prompt !== "string") return null;
-			const timeoutMs = typeof agent.timeoutMs === "number" ? agent.timeoutMs : 60_000;
-			const maxToolCalls = typeof agent.maxToolCalls === "number" ? agent.maxToolCalls : 12;
+			const timeoutMs =
+				typeof agent.timeoutMs === "number" ? agent.timeoutMs : 60_000;
+			const maxToolCalls =
+				typeof agent.maxToolCalls === "number" ? agent.maxToolCalls : 12;
 			return defineInstructions({
 				role: "user",
 				content: [
