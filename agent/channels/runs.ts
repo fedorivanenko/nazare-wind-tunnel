@@ -94,8 +94,17 @@ export default defineChannel<RunChannelState>({
 					{ runId: run.id, sessionId: run.sessionId, duplicate: true },
 					{ status: 200 },
 				);
+
+			const repositoryRoot = `/workspace/runs/${run.id}`;
 			const session = await from(input.workspaceId).send(
-				`Execute this mutation task against ${input.repository}@${input.sourceSha}. Implement immediately, then call finish_run exactly once.`,
+				[
+					`Mutation run ${run.id}`,
+					`Source: ${input.repository}@${input.sourceSha}`,
+					`Worktree: ${repositoryRoot}`,
+					"Task:",
+					input.task.agent.prompt,
+					"Implement the smallest valid change and call finish_run exactly once when ready.",
+				].join("\n\n"),
 				{
 					auth: {
 						authenticator: "wind-tunnel-token",
@@ -119,7 +128,12 @@ export default defineChannel<RunChannelState>({
 			);
 			await attachSession(run.id, session.id);
 			return Response.json(
-				{ runId: run.id, sessionId: session.id, taskSha256 },
+				{
+					runId: run.id,
+					sessionId: session.id,
+					workspaceId: input.workspaceId,
+					taskSha256,
+				},
 				{ status: 202 },
 			);
 		}),
