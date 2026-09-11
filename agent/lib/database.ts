@@ -34,7 +34,7 @@ async function initialize() {
 			create table if not exists wind_tunnel_runs (
 				id uuid primary key,
 				operation_id text not null unique,
-				session_id text unique,
+				session_id text,
 				status text not null,
 				repository text not null,
 				source_sha text not null,
@@ -48,6 +48,8 @@ async function initialize() {
 				finished_at timestamptz
 			)
 		`;
+		await database`alter table wind_tunnel_runs drop constraint if exists wind_tunnel_runs_session_id_key`;
+		await database`create index if not exists wind_tunnel_runs_session_id on wind_tunnel_runs(session_id)`;
 		await database`
 			create table if not exists wind_tunnel_events (
 				id text primary key,
@@ -60,11 +62,6 @@ async function initialize() {
 			)
 		`;
 		await database`create index if not exists wind_tunnel_events_run_at on wind_tunnel_events(run_id, emitted_at)`;
-		await database`
-			update wind_tunnel_runs
-			set error=${database.json({ code: "verification_failed", message: "One or more required evaluator checks failed" })}
-			where status='failed' and result is not null and error is null
-		`;
 	})();
 	return initialized;
 }
@@ -125,21 +122,17 @@ export async function listRuns(limit = 50) {
 	await database`
 		update wind_tunnel_runs
 		set status='failed', error=${database.json({ code: "stale_run", message: "Run stopped updating before reaching a terminal state" })}, updated_at=now(), finished_at=now()
-		where status in ('accepted','preparing','running') and updated_at < now() - interval '20 minutes'
+		where status in ('accepted','preparing','running','verifying') and updated_at < now() - interval '20 minutes'
 	`;
-	const rows =
-		await database`select * from wind_tunnel_runs order by created_at desc limit ${Math.min(100, Math.max(1, limit))}`;
+	const rows = await database`
+		select * from wind_tunnel_runs order by created_at desc limit ${Math.min(100, Math.max(1, limit))}
+	`;
 	return rows.map(mapRun);
 }
 
 export async function getRun(id: string) {
 	await initialize();
-	const rows =
-		/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-			id,
-		)
-			? await sql()`select * from wind_tunnel_runs where id=${id} limit 1`
-			: await sql()`select * from wind_tunnel_runs where session_id=${id} limit 1`;
+	const rows = await sql()`select * from wind_tunnel_runs where id=${id} limit 1`;
 	return rows[0] ? mapRun(rows[0]) : null;
 }
 
@@ -157,58 +150,55 @@ export async function persistEvent(input: {
 	at: string;
 }) {
 	await initialize();
+	if (!input.runId) return;
 	const database = sql();
-	if (input.runId)
-		await database`
-			update wind_tunnel_runs
-			set session_id=coalesce(session_id, ${input.sessionId}), updated_at=now()
-			where id=${input.runId} and (session_id is null or session_id=${input.sessionId})
-		`;
+	await database`
+		update wind_tunnel_runs
+		set session_id=coalesce(session_id, ${input.sessionId}), updated_at=now()
+		where id=${input.runId} and (session_id is null or session_id=${input.sessionId})
+	`;
 	await database`
 		insert into wind_tunnel_events (id, run_id, session_id, type, data, emitted_at)
-		select ${input.id}, id, ${input.sessionId}, ${input.type}, ${database.json((input.data ?? null) as never)}, ${input.at}
-		from wind_tunnel_runs where session_id=${input.sessionId}
+		values (${input.id}, ${input.runId}, ${input.sessionId}, ${input.type}, ${database.json((input.data ?? null) as never)}, ${input.at})
 		on conflict (id) do nothing
 	`;
 	if (input.type === "session.waiting") {
 		await database`
 			update wind_tunnel_runs
-			set status=case when result is null then 'verifying' else status end,
-				updated_at=now()
-			where session_id=${input.sessionId} and status not in ('completed','failed','cancelled')
+			set status=case when result is null then 'verifying' else status end, updated_at=now()
+			where id=${input.runId} and status not in ('completed','failed','cancelled')
 		`;
 		return;
 	}
 	const status = eventStatus(input.type);
 	if (!status) return;
-	const terminal =
-		status === "completed" || status === "failed" || status === "cancelled";
+	const terminal = status === "failed" || status === "cancelled";
 	if (terminal) {
 		await database`
 			update wind_tunnel_runs
 			set status=${status}, updated_at=now(), finished_at=now()
-			where session_id=${input.sessionId}
+			where id=${input.runId} and status not in ('completed','failed','cancelled')
 		`;
 	} else {
 		await database`
 			update wind_tunnel_runs
 			set status=${status}, updated_at=now()
-			where session_id=${input.sessionId} and status not in ('completed','failed','cancelled')
+			where id=${input.runId} and status not in ('completed','failed','cancelled')
 		`;
 	}
 }
 
-export async function failRun(sessionId: string, error: unknown) {
+export async function failRun(runId: string, error: unknown) {
 	await initialize();
 	const database = sql();
 	await database`
 		update wind_tunnel_runs
 		set status='failed', error=${database.json(error as never)}, updated_at=now(), finished_at=now()
-		where session_id=${sessionId} and result is null
+		where id=${runId} and result is null
 	`;
 }
 
-export async function finishRun(sessionId: string, result: unknown) {
+export async function finishRun(runId: string, result: unknown) {
 	await initialize();
 	const database = sql();
 	const passed = Boolean((result as { passed?: unknown } | null)?.passed);
@@ -216,17 +206,16 @@ export async function finishRun(sessionId: string, result: unknown) {
 		update wind_tunnel_runs
 		set status=${passed ? "completed" : "failed"},
 			result=${database.json(result as never)},
-			error=${passed ? null : database.json({ code: "verification_failed", message: "One or more required evaluator checks failed" })},
+			error=${passed ? null : database.json({ code: "verification_failed", message: "One or more required verification commands failed" })},
 			updated_at=now(), finished_at=now()
-		where session_id=${sessionId}
+		where id=${runId}
 	`;
 }
 
 function eventStatus(type: string) {
-	if (type === "session.started") return "preparing";
+	if (type === "turn.started") return "preparing";
 	if (type === "step.started") return "running";
 	if (type === "turn.failed" || type === "session.failed") return "failed";
 	if (type === "turn.cancelled") return "cancelled";
-	if (type === "session.completed") return "completed";
 	return null;
 }
