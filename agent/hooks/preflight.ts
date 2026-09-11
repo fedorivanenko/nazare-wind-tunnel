@@ -8,15 +8,20 @@ export default defineHook({
 			const runId = attributes?.runId;
 			const repository = attributes?.repository;
 			const sourceSha = attributes?.sourceSha;
-			const task = attributes?.task;
+			const taskJson = attributes?.taskJson;
 			if (
 				typeof runId !== "string" ||
 				typeof repository !== "string" ||
 				typeof sourceSha !== "string" ||
-				!task
+				typeof taskJson !== "string"
 			)
 				return;
-			await prepareRun({ runId, repository, sourceSha, task }, ctx);
+			await prepareRun({
+				runId,
+				repository,
+				sourceSha,
+				task: JSON.parse(taskJson) as unknown,
+			}, ctx);
 		},
 	},
 });
