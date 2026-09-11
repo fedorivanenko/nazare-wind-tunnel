@@ -3,6 +3,7 @@ node_modules/
 .env.*
 coverage/
 dist/
+.turbo/
 .tmp/
 .DS_Store
 .vercel/

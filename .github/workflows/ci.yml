@@ -21,4 +21,5 @@ jobs:
       - run: pnpm add --global @biomejs/biome@2.4.14
       - run: pnpm typecheck
       - run: pnpm check
-      - run: pnpm dashboard:build
+      - run: pnpm test
+      - run: pnpm build

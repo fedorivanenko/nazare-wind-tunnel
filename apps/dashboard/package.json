@@ -4,6 +4,7 @@
 	"type": "module",
 	"scripts": {
 		"build": "astro build",
+		"check": "biome check src astro.config.mjs",
 		"dev": "astro dev"
 	},
 	"dependencies": {

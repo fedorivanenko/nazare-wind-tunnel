@@ -1,0 +1,30 @@
+{
+	"$schema": "https://turbo.build/schema.json",
+	"tasks": {
+		"build": {
+			"dependsOn": ["^build"],
+			"env": [
+				"DASHBOARD_ACCESS_TOKEN",
+				"DATABASE_URL",
+				"EVE_WIND_TUNNEL_URL",
+				"WIND_TUNNEL_TOKEN"
+			],
+			"outputs": [".output/**", "dist/**"]
+		},
+		"check": {
+			"outputs": []
+		},
+		"dev": {
+			"cache": false,
+			"persistent": true
+		},
+		"test": {
+			"dependsOn": ["^build"],
+			"outputs": []
+		},
+		"typecheck": {
+			"dependsOn": ["^typecheck"],
+			"outputs": []
+		}
+	}
+}

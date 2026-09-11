@@ -1,31 +1,24 @@
 {
-  "name": "nazare-wind-tunnel",
-  "private": true,
-  "version": "1.0.0",
-  "type": "module",
-  "packageManager": "pnpm@10.17.1",
-  "scripts": {
-    "start": "eve start",
-    "build": "eve build",
-    "dev": "eve dev",
-    "deploy": "eve deploy",
-    "dashboard:dev": "pnpm --filter @nazare/wind-tunnel-dashboard dev",
-    "dashboard:build": "pnpm --filter @nazare/wind-tunnel-dashboard build",
-    "typecheck": "tsc -p tsconfig.eve.json --noEmit",
-    "check": "biome check agent scripts apps/dashboard/src apps/dashboard/astro.config.mjs"
-  },
-  "dependencies": {
-    "ai": "^7.0.97",
-    "eve": "0.52.5",
-    "postgres": "^3.4.9",
-    "zod": "^4.6.1"
-  },
-  "devDependencies": {
-    "@types/node": "24.13.3",
-    "tsx": "4.23.13",
-    "typescript": "5.9.3"
-  },
-  "engines": {
-    "node": "^24.0.0"
-  }
+	"name": "nazare-wind-tunnel-monorepo",
+	"private": true,
+	"version": "1.0.0",
+	"packageManager": "pnpm@10.17.1",
+	"scripts": {
+		"build": "turbo run build",
+		"check": "turbo run check",
+		"dev": "turbo run dev",
+		"test": "turbo run test",
+		"typecheck": "turbo run typecheck",
+		"agent:dev": "pnpm --filter @nazare/wind-tunnel-agent dev",
+		"dashboard:dev": "pnpm --filter @nazare/wind-tunnel-dashboard dev",
+		"deploy": "pnpm --filter @nazare/wind-tunnel-agent deploy",
+		"start": "pnpm --filter @nazare/wind-tunnel-agent start",
+		"wind-tunnel": "pnpm --filter @nazare/wind-tunnel-agent run wind-tunnel"
+	},
+	"devDependencies": {
+		"turbo": "2.10.12"
+	},
+	"engines": {
+		"node": "^24.0.0"
+	}
 }

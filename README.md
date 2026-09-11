@@ -66,18 +66,20 @@ finish_run
 [target-manifest tools]
 ```
 
-Agent definition lives under `agent/`:
+Agent app lives under `apps/agent/`:
 
 ```text
-agent/
-  agent.ts
-  instructions.md
-  sandbox/sandbox.ts
-  channels/
-  hooks/
-  instructions/
-  lib/
-  tools/
+apps/agent/
+  agent/
+    agent.ts
+    instructions.md
+    sandbox/sandbox.ts
+    channels/
+    hooks/
+    instructions/
+    lib/
+    tools/
+  scripts/
 ```
 
 ## Experiment contract
@@ -108,7 +110,7 @@ Subject repository owns task, preparation, and model-assistance tools. Wind Tunn
 }
 ```
 
-Model selection now belongs to `agent/agent.ts`; experiment `agent` fields remain compatibility metadata during migration.
+Model selection now belongs to `apps/agent/agent/agent.ts`; experiment `agent` fields remain compatibility metadata during migration.
 
 ## Deployment
 
@@ -119,16 +121,16 @@ fedor-studio/nazare-wind-tunnel
 https://nazare-wind-tunnel.vercel.app
 ```
 
-Commands:
+Repository uses pnpm workspaces and Turborepo. Commands run from repository root:
 
 ```bash
 pnpm install
-pnpm exec eve info
+pnpm --filter @nazare/wind-tunnel-agent exec eve info
 pnpm build
 pnpm deploy
 ```
 
-`eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; pushes to `main` deploy automatically.
+`turbo run build` builds both apps with dependency-aware caching. Agent project uses root directory `apps/agent`; `eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; only pushes to `main` deploy automatically.
 
 ## Dashboard
 
@@ -139,7 +141,7 @@ fedor-studio/nazare-wind-tunnel-dashboard
 https://nazare-wind-tunnel-dashboard.vercel.app
 ```
 
-The dashboard is a separate Vercel project connected to the same repository with root directory `apps/dashboard`. It deploys automatically on pushes to `main`. Access is protected by `DASHBOARD_ACCESS_TOKEN`; `WIND_TUNNEL_TOKEN` never reaches the browser.
+Dashboard is separate Vercel project connected to same repository with root directory `apps/dashboard`. Only pushes to `main` deploy automatically. Vercel skips each app when neither app nor its declared workspace dependencies changed. Access is protected by `DASHBOARD_ACCESS_TOKEN`; `WIND_TUNNEL_TOKEN` never reaches browser.
 
 ## Required configuration
 
@@ -193,14 +195,15 @@ SUBJECT_REPO=owner/repository \
 SUBJECT_SHA=$(git -C /path/to/subject rev-parse HEAD) \
 EXPERIMENT=experiments/path/experiment.json \
 SUBJECT_ARCHIVE=/tmp/source.tar.gz \
-node scripts/run-eve-wind-tunnel.mjs
+pnpm wind-tunnel
 ```
 
 ## Repository layout
 
 ```text
-agent/                  eve agent, channel, sandbox, and tools
+apps/agent/             eve agent, sandbox, tools, and invocation client
 apps/dashboard/         authenticated Astro dashboard
-scripts/                GitHub/local eve client
+packages/               future shared workspace packages
 .github/workflows/      validation
+turbo.json              task graph and cache policy
 ```

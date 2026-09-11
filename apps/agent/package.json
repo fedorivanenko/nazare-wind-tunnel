@@ -1,0 +1,30 @@
+{
+	"name": "@nazare/wind-tunnel-agent",
+	"private": true,
+	"version": "1.0.0",
+	"type": "module",
+	"scripts": {
+		"build": "eve build",
+		"check": "biome check agent scripts",
+		"deploy": "eve deploy",
+		"dev": "eve dev",
+		"start": "eve start",
+		"test": "node --import tsx --test 'agent/lib/*.test.ts'",
+		"typecheck": "tsc --noEmit",
+		"wind-tunnel": "node scripts/run-eve-wind-tunnel.mjs"
+	},
+	"dependencies": {
+		"ai": "^7.0.97",
+		"eve": "0.52.5",
+		"postgres": "^3.4.9",
+		"zod": "^4.6.1"
+	},
+	"devDependencies": {
+		"@types/node": "24.13.3",
+		"tsx": "4.23.13",
+		"typescript": "5.9.3"
+	},
+	"engines": {
+		"node": "^24.0.0"
+	}
+}
