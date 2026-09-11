@@ -35,7 +35,7 @@ export default defineDynamic({
 					`Task:\n${agent.prompt}`,
 					"Repository root: /workspace/repo",
 					`Hard execution budget: ${timeoutMs}ms and at most ${maxToolCalls} exploratory/editing tool calls before finish_run.`,
-					"Implement the smallest valid change immediately. Prefer direct edits over repository exploration. Call finish_run exactly once when the patch is ready.",
+					"Implement the smallest valid change immediately. Prefer direct edits over repository exploration. Call finish_run when ready; if checks fail, fix them and call finish_run again.",
 				].join("\n\n"),
 			});
 		},

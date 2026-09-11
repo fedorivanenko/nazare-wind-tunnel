@@ -104,7 +104,7 @@ export default defineChannel<RunChannelState>({
 					`Worktree: ${repositoryRoot}`,
 					"Task:",
 					input.task.agent.prompt,
-					"Implement the smallest valid change and call finish_run exactly once when ready.",
+					"Implement the smallest valid change and call finish_run when ready. If checks fail, fix them and call finish_run again.",
 				].join("\n\n"),
 				{
 					auth: {

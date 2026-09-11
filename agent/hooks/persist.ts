@@ -22,7 +22,11 @@ export default defineHook({
 			if (
 				result.kind === "tool-result" &&
 				result.toolName === "finish_run" &&
-				!result.isError
+				!result.isError &&
+				typeof result.output === "object" &&
+				result.output !== null &&
+				"passed" in result.output &&
+				result.output.passed === true
 			)
 				await finishRun(runId, result.output).catch((error) =>
 					console.error("Could not finalize run", error),

@@ -55,6 +55,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 			`Candidate patch modifies protected or generated paths: ${forbidden.join(", ")}`,
 		);
 
+	await sandbox.setNetworkPolicy({ allow: ["registry.npmjs.org"] });
 	const checks = [] as Array<{
 		command: string;
 		passed: boolean;
@@ -63,19 +64,23 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		stderr: string;
 		durationMs: number;
 	}>;
-	for (const command of prepared.verifyCommands) {
-		const started = Date.now();
-		const result = await sandbox.run({
-			command: `cd ${root} && CI=1 timeout 240s bash -lc ${shellQuote(command)}`,
-		});
-		checks.push({
-			command,
-			passed: result.exitCode === 0,
-			exitCode: result.exitCode,
-			stdout: bounded(result.stdout ?? "", 20_000),
-			stderr: bounded(result.stderr ?? "", 20_000),
-			durationMs: Date.now() - started,
-		});
+	try {
+		for (const command of prepared.verifyCommands) {
+			const started = Date.now();
+			const result = await sandbox.run({
+				command: `cd ${root} && CI=1 timeout 240s bash -lc ${shellQuote(command)}`,
+			});
+			checks.push({
+				command,
+				passed: result.exitCode === 0,
+				exitCode: result.exitCode,
+				stdout: bounded(result.stdout ?? "", 20_000),
+				stderr: bounded(result.stderr ?? "", 20_000),
+				durationMs: Date.now() - started,
+			});
+		}
+	} finally {
+		await sandbox.setNetworkPolicy("deny-all");
 	}
 	const passed = checks.every((check) => check.passed);
 	const result = {
@@ -102,7 +107,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 
 export default defineTool({
 	description:
-		"Capture the git diff and run the task's deterministic verification commands. Call exactly once after implementation.",
+		"Capture the git diff and run deterministic verification. If checks fail, fix the candidate and call finish_run again.",
 	inputSchema: z.object({}),
 	label: { start: () => "Capture diff and verify" },
 	execute: (_input, ctx) => finalizeCandidate(ctx),
