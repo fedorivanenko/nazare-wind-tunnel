@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { defineTool, type ToolContext } from "eve/tools";
 import { z } from "zod";
-import { preparedRun } from "../lib/run-state";
+import { preparedRun, resetModelBudget } from "../lib/run-state";
 import { bounded, shellQuote } from "../lib/subject";
 
 const PROTECTED_PATHS = [".git", ".wind-tunnel", ".github"];
@@ -83,6 +83,7 @@ export async function finalizeCandidate(ctx: Pick<ToolContext, "getSandbox">) {
 		await sandbox.setNetworkPolicy("deny-all");
 	}
 	const passed = checks.every((check) => check.passed);
+	if (!passed) resetModelBudget();
 	const result = {
 		passed,
 		changedFiles,
