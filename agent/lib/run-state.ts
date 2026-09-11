@@ -32,8 +32,11 @@ export type MutationRange = {
 };
 
 export type PreparedRun = {
+	repository: string;
+	sourceSha: string;
 	experimentPath: string;
 	task: string;
+	verifyCommands: string[];
 	bootstrap: Array<{ id: string; output: unknown }>;
 	tools: RuntimeTool[];
 	toolManifestSha256: string | null;
@@ -55,12 +58,12 @@ export type PreparedRun = {
 };
 
 export const preparedRun = defineState<PreparedRun | null>(
-	"nazare-wind-tunnel.prepared-run-v1",
+	"nazare-wind-tunnel.prepared-run-v2",
 	() => null,
 );
 
 const modelToolCalls = defineState<number>(
-	"nazare-wind-tunnel.model-tool-calls-v1",
+	"nazare-wind-tunnel.model-tool-calls-v2",
 	() => 0,
 );
 
