@@ -6,7 +6,6 @@
 	"scripts": {
 		"build": "eve build",
 		"check": "biome check agent scripts",
-		"deploy": "eve deploy",
 		"dev": "eve dev",
 		"start": "eve start",
 		"test": "node --import tsx --test 'agent/lib/*.test.ts'",

@@ -127,7 +127,7 @@ Repository uses pnpm workspaces and Turborepo. Commands run from repository root
 pnpm install
 pnpm --filter @nazare/wind-tunnel-agent exec eve info
 pnpm build
-pnpm deploy
+pnpm run deploy
 ```
 
 `turbo run build` builds both apps with dependency-aware caching. Agent project uses root directory `apps/agent`; `eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; only pushes to `main` deploy automatically.

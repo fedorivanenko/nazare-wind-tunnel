@@ -11,12 +11,13 @@
 		"typecheck": "turbo run typecheck",
 		"agent:dev": "pnpm --filter @nazare/wind-tunnel-agent dev",
 		"dashboard:dev": "pnpm --filter @nazare/wind-tunnel-dashboard dev",
-		"deploy": "pnpm --filter @nazare/wind-tunnel-agent deploy",
+		"deploy": "vercel deploy --prod --yes",
 		"start": "pnpm --filter @nazare/wind-tunnel-agent start",
 		"wind-tunnel": "pnpm --filter @nazare/wind-tunnel-agent run wind-tunnel"
 	},
 	"devDependencies": {
-		"turbo": "2.10.12"
+		"turbo": "2.10.12",
+		"vercel": "56.2.0"
 	},
 	"engines": {
 		"node": "^24.0.0"
