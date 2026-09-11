@@ -8,26 +8,22 @@ import {
 	getRunEvents,
 	listRuns,
 } from "../lib/database";
+import { runTaskSchema } from "../lib/task";
 
 const requestSchema = z.object({
 	operationId: z.string().min(1).max(500),
+	workspaceId: z.string().min(1).max(200),
 	repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
 	sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
-	experimentPath: z.string().min(1).max(500),
-	archiveBase64: z.string().min(1),
-	archiveSha256: z
-		.string()
-		.regex(/^[a-f0-9]{64}$/)
-		.optional(),
+	task: runTaskSchema,
 	trigger: z.record(z.string(), z.unknown()).optional(),
 });
 
 type RunChannelState = {
 	runId: string | null;
+	workspaceId: string | null;
 	repository: string | null;
 	sourceSha: string | null;
-	experimentPath: string | null;
-	archiveSha256: string | null;
 };
 
 function authorized(request: Request) {
@@ -57,10 +53,9 @@ export default defineChannel<RunChannelState>({
 	turnPolicy: "queue",
 	state: {
 		runId: null,
+		workspaceId: null,
 		repository: null,
 		sourceSha: null,
-		experimentPath: null,
-		archiveSha256: null,
 	},
 	metadata(state) {
 		return { ...state, audience: "private" as const };
@@ -81,69 +76,50 @@ export default defineChannel<RunChannelState>({
 					{ status: 400 },
 				);
 			const input = parsed.data;
-			const archive = Buffer.from(input.archiveBase64, "base64");
-			const archiveSha256 = createHash("sha256").update(archive).digest("hex");
-			if (input.archiveSha256 && input.archiveSha256 !== archiveSha256)
-				return Response.json(
-					{ error: "Archive digest mismatch" },
-					{ status: 400 },
-				);
+			const taskSha256 = createHash("sha256")
+				.update(JSON.stringify(input.task))
+				.digest("hex");
 			const requestedId = randomUUID();
 			const run = await createRun({
 				id: requestedId,
 				operationId: input.operationId,
 				repository: input.repository,
 				sourceSha: input.sourceSha,
-				experimentPath: input.experimentPath,
-				archiveSha256,
-				request: {
-					...input,
-					archiveBase64: "[attachment omitted]",
-					archiveSha256,
-				},
+				experimentPath: "inline-task",
+				archiveSha256: taskSha256,
+				request: input,
 			});
 			if (run.sessionId)
 				return Response.json(
 					{ runId: run.id, sessionId: run.sessionId, duplicate: true },
 					{ status: 200 },
 				);
-			const session = await from(input.operationId).send(
-				[
-					{
-						type: "text",
-						text: `Execute prepared Wind Tunnel experiment ${input.experimentPath} for ${input.repository} at exact source SHA ${input.sourceSha}. Implement immediately, then call finish_run exactly once.`,
-					},
-					{
-						type: "file",
-						data: archive,
-						mediaType: "application/gzip",
-						filename: "source.tar.gz",
-					},
-				],
+			const session = await from(input.workspaceId).send(
+				`Execute this mutation task against ${input.repository}@${input.sourceSha}. Implement immediately, then call finish_run exactly once.`,
 				{
 					auth: {
 						authenticator: "wind-tunnel-token",
-						principalId: "github-actions",
+						principalId: "api",
 						principalType: "service",
 						attributes: {
 							runId: run.id,
-							experimentPath: input.experimentPath,
+							workspaceId: input.workspaceId,
 							repository: input.repository,
 							sourceSha: input.sourceSha,
+							task: input.task,
 						},
 					},
 					state: {
 						runId: run.id,
+						workspaceId: input.workspaceId,
 						repository: input.repository,
 						sourceSha: input.sourceSha,
-						experimentPath: input.experimentPath,
-						archiveSha256,
 					},
 				},
 			);
 			await attachSession(run.id, session.id);
 			return Response.json(
-				{ runId: run.id, sessionId: session.id, archiveSha256 },
+				{ runId: run.id, sessionId: session.id, taskSha256 },
 				{ status: 202 },
 			);
 		}),
