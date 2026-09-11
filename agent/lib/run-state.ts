@@ -32,8 +32,10 @@ export type MutationRange = {
 };
 
 export type PreparedRun = {
+	runId: string;
 	repository: string;
 	sourceSha: string;
+	repositoryRoot: string;
 	experimentPath: string;
 	task: string;
 	verifyCommands: string[];
@@ -58,18 +60,22 @@ export type PreparedRun = {
 };
 
 export const preparedRun = defineState<PreparedRun | null>(
-	"nazare-wind-tunnel.prepared-run-v2",
+	"nazare-wind-tunnel.prepared-run-v3",
 	() => null,
 );
 
 const modelToolCalls = defineState<number>(
-	"nazare-wind-tunnel.model-tool-calls-v2",
+	"nazare-wind-tunnel.model-tool-calls-v3",
 	() => 0,
 );
 
+export function resetModelBudget() {
+	modelToolCalls.update(() => 0);
+}
+
 export function requireModelBudget() {
 	const prepared = preparedRun.get();
-	if (!prepared) throw new Error("Subject preparation is incomplete");
+	if (!prepared) throw new Error("Run preparation is incomplete");
 	const deadline = Date.parse(prepared.preparedAt) + prepared.modelTimeoutMs;
 	if (Date.now() > deadline)
 		throw new Error(
