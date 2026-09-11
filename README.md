@@ -1,55 +1,147 @@
 # Nazare Wind Tunnel
 
-Nazare Wind Tunnel runs exact source revisions through an eve coding agent in hardware-isolated, repository-scoped Vercel Sandboxes.
+Nazare Wind Tunnel runs an exact public Git revision through an eve coding agent in a repository-scoped Vercel Sandbox. Agent edits candidate, executes deterministic checks, and stores patch, evidence, timing, and event history in PostgreSQL.
 
-## Production architecture
+## Architecture
 
 ```text
-GitHub pull request
-        |
-        | manual workflow_dispatch
-        v
-GitHub Action
-  - resolves exact PR SHA
-  - validates task spec
-        |
-        v
-Wind Tunnel run API + PostgreSQL registry
-        |
-        v
-Vercel eve Workflow
-        |
-        +-- one durable session and sandbox per repository
-        +-- persistent source mirror, checkout, and keyed preparation cache
-        +-- model edits and deterministic verification
-        +-- PostgreSQL event mirror: runs, model activity, tools, evidence
+API client or GitHub Action
+  -> POST /api/runs with repository, SHA, and task
+  -> repository-scoped eve session and Vercel Sandbox
+  -> persistent mirror, checkout, pnpm store, and preparation cache
+  -> model mutation with network denied
+  -> deterministic verification
+  -> PostgreSQL run and event registry
+  -> dashboard
 ```
 
-Vercel is the only runtime. The former Railway API, worker, PostgreSQL queue, storage adapters, and Docker deployment path have been removed.
+Vercel is only runtime. Each repository reuses one durable eve workspace and sandbox. Every run clears model context and resets checkout to requested SHA while preserving source mirror and prepared dependencies.
 
-## Security boundary
+## Monorepo
 
-GitHub Action sends exact candidate repository and SHA. Repository continuation identity is the repository slug, so later tasks reuse the same durable eve session and Vercel Sandbox. Sandbox receives no GitHub, Vercel, control-plane, database, or object-storage credentials; source repositories must therefore be publicly cloneable until credential brokering is configured.
+```text
+apps/agent/       eve agent, run API, sandbox, tools, and API client
+apps/dashboard/   authenticated Astro dashboard
+.github/workflows/ci.yml
+turbo.json
+```
 
-Inside sandbox:
+Root commands use pnpm workspaces and Turborepo:
 
-1. A preflight hook fetches exact SHA into persistent `/workspace/source.git`.
-2. It resets persistent `/workspace/repo` to that immutable baseline.
-3. It runs task preparation only when repository, SHA, or preparation commands change.
-4. Network changes to `deny-all` before model execution.
-5. Agent mutates candidate.
-6. `finish_run` captures binary patch and runs deterministic verification in same checkout.
-7. Next task clears model context and resets checkout while preserving sandbox and prepared dependencies.
+```bash
+pnpm install
+pnpm typecheck
+pnpm check
+pnpm test
+pnpm build
+pnpm dev
+```
 
-Agent cannot push or access credentials.
+Run apps separately:
 
-## eve agent
+```bash
+pnpm agent:dev
+pnpm dashboard:dev
+```
 
-Pinned runtime:
+## Task API
+
+Create run:
+
+```http
+POST /api/runs
+Authorization: Bearer <WIND_TUNNEL_TOKEN>
+Content-Type: application/json
+```
+
+```json
+{
+  "operationId": "unique-idempotency-key",
+  "workspaceId": "owner/repository",
+  "repository": "owner/repository",
+  "sourceSha": "40-character-git-sha",
+  "task": {
+    "prepare": ["pnpm install --frozen-lockfile"],
+    "agent": {
+      "prompt": "Implement requested change.",
+      "timeoutMs": 60000,
+      "maxToolCalls": 24
+    },
+    "verify": ["pnpm lint", "pnpm test", "pnpm typecheck", "pnpm build"]
+  },
+  "trigger": {
+    "provider": "github-actions"
+  }
+}
+```
+
+Response is `202 Accepted`:
+
+```json
+{
+  "runId": "uuid",
+  "sessionId": "eve-session-id",
+  "workspaceId": "owner/repository",
+  "taskSha256": "sha256"
+}
+```
+
+Read run and evidence:
+
+```http
+GET /api/runs/:runId
+Authorization: Bearer <WIND_TUNNEL_TOKEN>
+```
+
+List recent runs:
+
+```http
+GET /api/runs?limit=50
+Authorization: Bearer <WIND_TUNNEL_TOKEN>
+```
+
+`operationId` is idempotency key. Repeating it returns existing run. `workspaceId` must match `repository`, guaranteeing one persistent workspace per repository.
+
+## Local API client
+
+```bash
+EVE_WIND_TUNNEL_URL=https://nazare-wind-tunnel.vercel.app \
+WIND_TUNNEL_TOKEN=... \
+SUBJECT_REPO=owner/repository \
+SUBJECT_SHA=$(git -C /path/to/repository rev-parse HEAD) \
+EXPERIMENT=/path/to/task.json \
+pnpm wind-tunnel
+```
+
+Optional variables:
+
+```text
+WIND_TUNNEL_OPERATION_ID
+EVE_RUN_TIMEOUT_MS
+EVE_RESULT_PATH
+EVE_EVENTS_PATH
+```
+
+Client submits run, polls until terminal state, writes result and events, and exits nonzero unless verification passes.
+
+## Sandbox boundary
+
+1. Fetch exact SHA into persistent `/workspace/source.git`.
+2. Reset persistent `/workspace/repo` to immutable baseline.
+3. Run preparation only when repository, SHA, or preparation commands changed.
+4. Deny network before model execution.
+5. Permit only model-facing filesystem and shell tools.
+6. Reject changes to `.git`, `.github`, `.wind-tunnel`, dependency directories, build outputs, and generated directories.
+7. Temporarily allow `registry.npmjs.org` during verification.
+8. Capture binary patch and all check output.
+
+Sandbox receives no GitHub, Vercel, database, or provider credentials. Candidate repository must remain publicly cloneable until authenticated source delivery is implemented.
+
+## Runtime
 
 ```text
 eve 0.52.5
-model openai/gpt-oss-120b
+openai/gpt-oss-120b
 reasoning low
 Vercel Sandbox: 2 vCPU
 pnpm 10.17.1
@@ -63,96 +155,50 @@ read_file
 write_file
 grep
 finish_run
-[target-manifest tools]
 ```
-
-Agent app lives under `apps/agent/`:
-
-```text
-apps/agent/
-  agent/
-    agent.ts
-    instructions.md
-    sandbox/sandbox.ts
-    channels/
-    hooks/
-    instructions/
-    lib/
-    tools/
-  scripts/
-```
-
-## Experiment contract
-
-Subject repository owns task, preparation, and model-assistance tools. Wind Tunnel owns versioned trusted evaluators:
-
-```json
-{
-  "id": "marketing-consent-02",
-  "taskFile": "experiments/luna-operability/task-02-marketing-consent.md",
-  "evaluator": "marketing-consent-v2",
-  "allowedPaths": ["app"],
-  "agent": {
-    "provider": "vercel-ai-gateway",
-    "model": "openai/gpt-oss-120b",
-    "thinking": "low",
-    "timeoutMs": 30000
-  },
-  "tools": {
-    "bootstrap": [{
-      "id": "task-context",
-      "entrypoint": ".wind-tunnel/prepare-change.ts",
-      "timeoutMs": 3000,
-      "maxOutputBytes": 24000,
-      "required": true
-    }]
-  }
-}
-```
-
-Model selection now belongs to `apps/agent/agent/agent.ts`; experiment `agent` fields remain compatibility metadata during migration.
 
 ## Deployment
 
-Vercel project:
+Agent:
 
 ```text
-fedor-studio/nazare-wind-tunnel
-https://nazare-wind-tunnel.vercel.app
+Vercel project: fedor-studio/nazare-wind-tunnel
+Root directory: apps/agent
+URL: https://nazare-wind-tunnel.vercel.app
 ```
 
-Repository uses pnpm workspaces and Turborepo. Commands run from repository root:
+Dashboard:
+
+```text
+Vercel project: fedor-studio/nazare-wind-tunnel-dashboard
+Root directory: apps/dashboard
+URL: https://nazare-wind-tunnel-dashboard.vercel.app
+```
+
+Both projects disable preview deployments and enable affected-project skipping. Pushes to `main` deploy changed apps only.
+
+Manual agent deployment from repository root:
 
 ```bash
-pnpm install
-pnpm --filter @nazare/wind-tunnel-agent exec eve info
-pnpm build
 pnpm run deploy
 ```
 
-`turbo run build` builds both apps with dependency-aware caching. Agent project uses root directory `apps/agent`; `eve build` creates Vercel Workflow/web output and prewarms reusable Vercel Sandbox template. Project is connected to `fedorivanenko/nazare-wind-tunnel`; only pushes to `main` deploy automatically.
+## Configuration
 
-## Dashboard
-
-The Astro dashboard reads the PostgreSQL-backed run registry and durable eve session streams through a server-side authenticated proxy. It automatically lists runs and shows execution status, model/tool activity, verification evidence, changed files, and raw redacted events.
-
-```text
-fedor-studio/nazare-wind-tunnel-dashboard
-https://nazare-wind-tunnel-dashboard.vercel.app
-```
-
-Dashboard is separate Vercel project connected to same repository with root directory `apps/dashboard`. Only pushes to `main` deploy automatically. Vercel skips each app when neither app nor its declared workspace dependencies changed. Access is protected by `DASHBOARD_ACCESS_TOKEN`; `WIND_TUNNEL_TOKEN` never reaches browser.
-
-## Required configuration
-
-eve project production environment:
+Agent production environment:
 
 ```text
 WIND_TUNNEL_TOKEN
 DATABASE_URL
 ```
 
-Dashboard project production environment:
+Optional persistent pnpm cache drive:
+
+```text
+WIND_TUNNEL_PNPM_CACHE_DRIVE
+```
+
+Dashboard production environment:
 
 ```text
 EVE_WIND_TUNNEL_URL
@@ -160,9 +206,11 @@ WIND_TUNNEL_TOKEN
 DASHBOARD_ACCESS_TOKEN
 ```
 
-Vercel project OIDC authenticates eve to AI Gateway automatically; no model-provider secret is configured.
+Vercel OIDC authenticates eve to AI Gateway. No model-provider secret is required.
 
-Hydrogen GitHub repository:
+## GitHub Actions
+
+Subject repository workflow resolves exact pull-request SHA, reads task JSON, calls `POST /api/runs`, polls result, and uploads redacted evidence as private Actions artifacts. Configure:
 
 ```text
 Actions variable:
@@ -170,40 +218,4 @@ EVE_WIND_TUNNEL_URL=https://nazare-wind-tunnel.vercel.app
 
 Actions secret:
 WIND_TUNNEL_TOKEN
-```
-
-No GitHub deploy key/token is needed by eve. GitHub Action already has read access to private source and uploads credential-free archive.
-
-## Trigger
-
-From GitHub Actions, run **Run eve Wind Tunnel** with:
-
-```text
-pr=<same-repository PR number>
-task=experiments/luna-operability/task-02-marketing-consent.json
-```
-
-Workflow uploads redacted eve NDJSON events plus compact result JSON as private GitHub Actions artifacts.
-
-For local invocation against deployed agent:
-
-```bash
-git -C /path/to/subject archive --format=tar.gz --output=/tmp/source.tar.gz HEAD
-EVE_WIND_TUNNEL_URL=https://nazare-wind-tunnel.vercel.app \
-WIND_TUNNEL_TOKEN=... \
-SUBJECT_REPO=owner/repository \
-SUBJECT_SHA=$(git -C /path/to/subject rev-parse HEAD) \
-EXPERIMENT=experiments/path/experiment.json \
-SUBJECT_ARCHIVE=/tmp/source.tar.gz \
-pnpm wind-tunnel
-```
-
-## Repository layout
-
-```text
-apps/agent/             eve agent, sandbox, tools, and invocation client
-apps/dashboard/         authenticated Astro dashboard
-packages/               future shared workspace packages
-.github/workflows/      validation
-turbo.json              task graph and cache policy
 ```

@@ -1,80 +1,75 @@
+import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
-import { Client } from "eve/client";
 
 function required(name) {
 	const value = process.env[name];
 	if (!value) throw new Error(`${name} is required`);
 	return value;
 }
+
+async function responseJson(response) {
+	const body = await response.text();
+	if (!response.ok)
+		throw new Error(`Wind Tunnel API ${response.status}: ${body}`);
+	return JSON.parse(body);
+}
+
 const host = required("EVE_WIND_TUNNEL_URL").replace(/\/$/, "");
 const token = required("WIND_TUNNEL_TOKEN");
 const repository = required("SUBJECT_REPO");
 const sourceSha = required("SUBJECT_SHA");
-const experiment = required("EXPERIMENT");
-const archivePath = required("SUBJECT_ARCHIVE");
-const timeoutMs = Number(process.env.EVE_RUN_TIMEOUT_MS ?? 180_000);
-const bytes = await readFile(archivePath);
-const client = new Client({ host, auth: { bearer: token }, redirect: "error" });
-await client.health();
-const controller = new AbortController();
-const timeout = setTimeout(() => controller.abort(), timeoutMs);
-let session;
-try {
-	const created = await client.sessions.create({
-		operationId: `${repository}:${sourceSha}:${experiment}:${process.env.GITHUB_RUN_ID ?? Date.now()}`,
-		message: [
-			{
-				type: "text",
-				text: `Implement Wind Tunnel experiment ${experiment} for ${repository} at exact source SHA ${sourceSha}. First call prepare_subject with this experiment path. After implementation call finish_run.`,
-			},
-			{
-				type: "file",
-				data: `data:application/gzip;base64,${bytes.toString("base64")}`,
-				mediaType: "application/gzip",
-				filename: "source.tar.gz",
-			},
-		],
-		clientContext: {
+const taskPath = required("EXPERIMENT");
+const timeoutMs = Number(process.env.EVE_RUN_TIMEOUT_MS ?? 10 * 60_000);
+const operationId =
+	process.env.WIND_TUNNEL_OPERATION_ID ??
+	`${repository}:${sourceSha}:${randomUUID()}`;
+const task = JSON.parse(await readFile(taskPath, "utf8"));
+const headers = {
+	authorization: `Bearer ${token}`,
+	"content-type": "application/json",
+};
+const signal = AbortSignal.timeout(timeoutMs);
+
+const accepted = await responseJson(
+	await fetch(`${host}/api/runs`, {
+		method: "POST",
+		headers,
+		body: JSON.stringify({
+			operationId,
+			workspaceId: repository,
 			repository,
 			sourceSha,
-			experiment,
-			runtime: "eve@0.52.5",
-			sandbox: "vercel",
-		},
-		signal: controller.signal,
-	});
-	session = created.session;
-	const result = await created.response.result();
-	const failedEvent = result.events.find(
-		(event) => event.type === "turn.failed" || event.type === "session.failed",
+			task,
+			trigger: { provider: "local-client" },
+		}),
+		signal,
+	}),
+);
+
+let detail;
+while (true) {
+	detail = await responseJson(
+		await fetch(`${host}/api/runs/${accepted.runId}`, { headers, signal }),
 	);
-	const status = failedEvent ? "failed" : result.status;
-	const output = {
-		sessionId: result.sessionId,
-		status,
-		message: result.message ?? null,
-		eventCount: result.events.length,
-		error: failedEvent && "data" in failedEvent ? failedEvent.data : null,
-	};
-	const sanitizedEvents = JSON.parse(
-		JSON.stringify(result.events, (_key, value) =>
-			typeof value === "string" && value.startsWith("data:")
-				? "[inline attachment redacted]"
-				: value,
-		),
-	);
-	await writeFile(
-		process.env.EVE_RESULT_PATH ?? "eve-result.json",
-		JSON.stringify(output, null, 2),
-	);
-	await writeFile(
-		process.env.EVE_EVENTS_PATH ?? "eve-events.json",
-		JSON.stringify(sanitizedEvents, null, 2),
-	);
-	process.stdout.write(`${JSON.stringify(output)}\n`);
-	if (status === "failed") process.exitCode = 1;
-} finally {
-	clearTimeout(timeout);
-	if (controller.signal.aborted && session)
-		await session.cancel({ tasks: true }).catch(() => {});
+	if (["completed", "failed", "cancelled"].includes(detail.run.status)) break;
+	await new Promise((resolve) => setTimeout(resolve, 2_000));
 }
+
+const output = {
+	runId: accepted.runId,
+	sessionId: accepted.sessionId,
+	status: detail.run.status,
+	result: detail.run.result,
+	error: detail.run.error,
+};
+await writeFile(
+	process.env.EVE_RESULT_PATH ?? "eve-result.json",
+	JSON.stringify(output, null, 2),
+);
+await writeFile(
+	process.env.EVE_EVENTS_PATH ?? "eve-events.json",
+	JSON.stringify(detail.events, null, 2),
+);
+process.stdout.write(`${JSON.stringify(output)}\n`);
+if (detail.run.status !== "completed" || detail.run.result?.passed !== true)
+	process.exitCode = 1;

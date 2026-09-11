@@ -18,7 +18,6 @@ export default defineHook({
 				return;
 			await prepareRun(
 				{
-					runId,
 					repository,
 					sourceSha,
 					task: JSON.parse(taskJson) as unknown,

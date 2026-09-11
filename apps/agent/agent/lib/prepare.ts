@@ -1,16 +1,14 @@
 import { createHash } from "node:crypto";
 import type { ToolContext } from "eve/tools";
 import { preparedRun, resetModelBudget } from "./run-state";
-import { bounded, shellQuote } from "./subject";
+import { bounded, REPOSITORY_ROOT, shellQuote } from "./subject";
 import { parseRunTask, type RunTask } from "./task";
 
 const SOURCE_MIRROR = "/workspace/source.git";
-const REPOSITORY_ROOT = "/workspace/repo";
 const PREPARATION_KEY_PATH = "/workspace/.wind-tunnel-preparation-key";
 
 export async function prepareRun(
 	input: {
-		runId: string;
 		repository: string;
 		sourceSha: string;
 		task: RunTask | unknown;
@@ -96,20 +94,9 @@ export async function prepareRun(
 	await sandbox.setNetworkPolicy("deny-all");
 	const preparedAt = new Date().toISOString();
 	const prepared = {
-		runId: input.runId,
-		repository: input.repository,
 		sourceSha: input.sourceSha,
 		repositoryRoot,
-		experimentPath: "inline-task",
-		task: task.agent.prompt,
 		verifyCommands: task.verify,
-		bootstrap: [],
-		tools: [],
-		toolManifestSha256: null,
-		preparedDependencyKey: null,
-		compiledSubject: null,
-		mutationPaths: [],
-		mutationRanges: [],
 		modelTimeoutMs: task.agent.timeoutMs ?? 60_000,
 		maxToolCalls: task.agent.maxToolCalls ?? 12,
 		preparationStartedAt: startedAt,
@@ -118,8 +105,6 @@ export async function prepareRun(
 			sandboxAcquireMs,
 			sourceSetupMs,
 			dependencyInstallMs: prepareMs,
-			subjectCompileMs: 0,
-			bootstrapMs: 0,
 		},
 		preparedAt,
 	};

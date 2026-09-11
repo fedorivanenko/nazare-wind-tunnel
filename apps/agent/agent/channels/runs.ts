@@ -10,14 +10,19 @@ import {
 } from "../lib/database";
 import { runTaskSchema } from "../lib/task";
 
-const requestSchema = z.object({
-	operationId: z.string().min(1).max(500),
-	workspaceId: z.string().min(1).max(200),
-	repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
-	sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
-	task: runTaskSchema,
-	trigger: z.record(z.string(), z.unknown()).optional(),
-});
+const requestSchema = z
+	.object({
+		operationId: z.string().min(1).max(500),
+		workspaceId: z.string().min(1).max(200),
+		repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+		sourceSha: z.string().regex(/^[a-f0-9]{40}$/),
+		task: runTaskSchema,
+		trigger: z.record(z.string(), z.unknown()).optional(),
+	})
+	.refine((input) => input.workspaceId === input.repository, {
+		message: "workspaceId must match repository",
+		path: ["workspaceId"],
+	});
 
 type RunChannelState = {
 	runId: string | null;
@@ -85,7 +90,7 @@ export default defineChannel<RunChannelState>({
 				repository: input.repository,
 				sourceSha: input.sourceSha,
 				experimentPath: "inline-task",
-				archiveSha256: taskSha256,
+				taskSha256,
 				request: input,
 			});
 			if (run.sessionId)
@@ -102,9 +107,7 @@ export default defineChannel<RunChannelState>({
 					`Mutation run ${run.id}`,
 					`Source: ${input.repository}@${input.sourceSha}`,
 					`Worktree: ${repositoryRoot}`,
-					"Task:",
-					input.task.agent.prompt,
-					"Implement the smallest valid change and call finish_run when ready. If checks fail, fix them and call finish_run again.",
+					"Execute prepared task and call finish_run when ready.",
 				].join("\n\n"),
 				{
 					auth: {

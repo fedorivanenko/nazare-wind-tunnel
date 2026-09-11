@@ -1,56 +1,15 @@
 import { defineState } from "eve/context";
 
-export type RuntimeToolField = {
-	type: "string" | "boolean" | "number";
-	description?: string;
-	optional?: boolean;
-};
-
-export type RuntimeTool = {
-	name: string;
-	description: string;
-	entrypoint: string;
-	operation: string;
-	timeoutMs?: number;
-	maxOutputBytes?: number;
-	parameters: Record<string, RuntimeToolField>;
-};
-
 export type PreparationTimings = {
 	sandboxAcquireMs: number;
 	sourceSetupMs: number;
 	dependencyInstallMs: number;
-	subjectCompileMs: number;
-	bootstrapMs: number;
-};
-
-export type MutationRange = {
-	file: string;
-	symbol: string;
-	startLine: number;
-	endLine: number;
 };
 
 export type PreparedRun = {
-	runId: string;
-	repository: string;
 	sourceSha: string;
 	repositoryRoot: string;
-	experimentPath: string;
-	task: string;
 	verifyCommands: string[];
-	bootstrap: Array<{ id: string; output: unknown }>;
-	tools: RuntimeTool[];
-	toolManifestSha256: string | null;
-	preparedDependencyKey: string | null;
-	compiledSubject: {
-		outputPath: string;
-		sha256: string;
-		bytes: number;
-		stdout: string;
-	} | null;
-	mutationPaths: string[];
-	mutationRanges: MutationRange[];
 	modelTimeoutMs: number;
 	maxToolCalls: number;
 	preparationStartedAt: string;
@@ -60,12 +19,12 @@ export type PreparedRun = {
 };
 
 export const preparedRun = defineState<PreparedRun | null>(
-	"nazare-wind-tunnel.prepared-run-v3",
+	"nazare-wind-tunnel.prepared-run-v4",
 	() => null,
 );
 
 const modelToolCalls = defineState<number>(
-	"nazare-wind-tunnel.model-tool-calls-v3",
+	"nazare-wind-tunnel.model-tool-calls-v4",
 	() => 0,
 );
 

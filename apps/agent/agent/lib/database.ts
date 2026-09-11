@@ -8,7 +8,7 @@ export type RunRecord = {
 	repository: string;
 	sourceSha: string;
 	experimentPath: string;
-	archiveSha256: string;
+	taskSha256: string;
 	createdAt: string;
 	updatedAt: string;
 	finishedAt: string | null;
@@ -75,7 +75,7 @@ function mapRun(row: Record<string, unknown>): RunRecord {
 		repository: String(row.repository),
 		sourceSha: String(row.source_sha),
 		experimentPath: String(row.experiment_path),
-		archiveSha256: String(row.archive_sha256),
+		taskSha256: String(row.archive_sha256),
 		createdAt: new Date(String(row.created_at)).toISOString(),
 		updatedAt: new Date(String(row.updated_at)).toISOString(),
 		finishedAt: row.finished_at
@@ -92,13 +92,13 @@ export async function createRun(input: {
 	repository: string;
 	sourceSha: string;
 	experimentPath: string;
-	archiveSha256: string;
+	taskSha256: string;
 	request: unknown;
 }) {
 	await initialize();
 	const rows = await sql()`
 		insert into wind_tunnel_runs (id, operation_id, status, repository, source_sha, experiment_path, archive_sha256, request)
-		values (${input.id}, ${input.operationId}, 'accepted', ${input.repository}, ${input.sourceSha}, ${input.experimentPath}, ${input.archiveSha256}, ${sql().json(input.request as never)})
+		values (${input.id}, ${input.operationId}, 'accepted', ${input.repository}, ${input.sourceSha}, ${input.experimentPath}, ${input.taskSha256}, ${sql().json(input.request as never)})
 		on conflict (operation_id) do update set updated_at = now()
 		returning *
 	`;
