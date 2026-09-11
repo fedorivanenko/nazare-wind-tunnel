@@ -16,12 +16,15 @@ export default defineHook({
 				typeof taskJson !== "string"
 			)
 				return;
-			await prepareRun({
-				runId,
-				repository,
-				sourceSha,
-				task: JSON.parse(taskJson) as unknown,
-			}, ctx);
+			await prepareRun(
+				{
+					runId,
+					repository,
+					sourceSha,
+					task: JSON.parse(taskJson) as unknown,
+				},
+				ctx,
+			);
 		},
 	},
 });
