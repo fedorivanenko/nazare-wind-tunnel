@@ -76,9 +76,8 @@ export default defineChannel<RunChannelState>({
 					{ status: 400 },
 				);
 			const input = parsed.data;
-			const taskSha256 = createHash("sha256")
-				.update(JSON.stringify(input.task))
-				.digest("hex");
+			const taskJson = JSON.stringify(input.task);
+			const taskSha256 = createHash("sha256").update(taskJson).digest("hex");
 			const requestedId = randomUUID();
 			const run = await createRun({
 				id: requestedId,
@@ -115,7 +114,7 @@ export default defineChannel<RunChannelState>({
 							workspaceId: input.workspaceId,
 							repository: input.repository,
 							sourceSha: input.sourceSha,
-							task: input.task,
+							taskJson,
 						},
 					},
 					state: {
