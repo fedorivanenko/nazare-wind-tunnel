@@ -5,9 +5,15 @@ export default defineDynamic({
 		"turn.started": async (_event, ctx) => {
 			const attributes = ctx.session.auth.current?.attributes;
 			const runId = attributes?.runId;
-			const task = attributes?.task;
-			if (typeof runId !== "string" || !task || typeof task !== "object")
+			const taskJson = attributes?.taskJson;
+			if (typeof runId !== "string" || typeof taskJson !== "string") return null;
+			let task: unknown;
+			try {
+				task = JSON.parse(taskJson);
+			} catch {
 				return null;
+			}
+			if (!task || typeof task !== "object") return null;
 			const agent = (task as { agent?: { prompt?: unknown; timeoutMs?: unknown; maxToolCalls?: unknown } }).agent;
 			if (!agent || typeof agent.prompt !== "string") return null;
 			const timeoutMs = typeof agent.timeoutMs === "number" ? agent.timeoutMs : 60_000;
