@@ -1,10 +1,14 @@
 import type { ToolContext } from "eve/tools";
-import { preparedRun } from "./run-state";
-import { bounded, REPOSITORY_ROOT, shellQuote } from "./subject";
+import { preparedRun, resetModelBudget } from "./run-state";
+import { bounded, shellQuote } from "./subject";
 import { parseRunTask, type RunTask } from "./task";
+
+const SOURCE_MIRROR = "/workspace/source.git";
+const RUNS_ROOT = "/workspace/runs";
 
 export async function prepareRun(
 	input: {
+		runId: string;
 		repository: string;
 		sourceSha: string;
 		task: RunTask | unknown;
@@ -14,12 +18,18 @@ export async function prepareRun(
 	const startedAt = new Date().toISOString();
 	const startedMs = Date.now();
 	const task = parseRunTask(input.task);
+	const repositoryRoot = `${RUNS_ROOT}/${input.runId}`;
 
 	const sandboxAcquireStartedMs = Date.now();
 	const sandbox = await ctx.getSandbox();
 	const sandboxAcquireMs = Date.now() - sandboxAcquireStartedMs;
 	await sandbox.setNetworkPolicy({
-		allow: ["github.com", "api.github.com", "objects.githubusercontent.com", "registry.npmjs.org"],
+		allow: [
+			"github.com",
+			"api.github.com",
+			"objects.githubusercontent.com",
+			"registry.npmjs.org",
+		],
 	});
 
 	const sourceSetupStartedMs = Date.now();
@@ -27,15 +37,16 @@ export async function prepareRun(
 	const sourceSetup = await sandbox.run({
 		command: [
 			"set -euo pipefail",
-			`if [ ! -d ${REPOSITORY_ROOT}/.git ]; then`,
-			`  rm -rf ${REPOSITORY_ROOT}`,
-			`  git clone --filter=blob:none --no-checkout ${shellQuote(repositoryUrl)} ${REPOSITORY_ROOT}`,
+			`mkdir -p ${RUNS_ROOT}`,
+			`if [ ! -d ${SOURCE_MIRROR} ]; then`,
+			`  git clone --mirror --filter=blob:none ${shellQuote(repositoryUrl)} ${SOURCE_MIRROR}`,
 			"fi",
-			`cd ${REPOSITORY_ROOT}`,
-			`git remote set-url origin ${shellQuote(repositoryUrl)}`,
-			`git fetch --quiet --depth=1 origin ${shellQuote(input.sourceSha)}`,
-			`git reset --hard ${shellQuote(input.sourceSha)}`,
-			"git clean -fdx -e node_modules -e .pnpm-store",
+			`git --git-dir=${SOURCE_MIRROR} remote set-url origin ${shellQuote(repositoryUrl)}`,
+			`git --git-dir=${SOURCE_MIRROR} fetch --quiet origin ${shellQuote(input.sourceSha)}`,
+			`git --git-dir=${SOURCE_MIRROR} worktree prune`,
+			`rm -rf ${shellQuote(repositoryRoot)}`,
+			`git --git-dir=${SOURCE_MIRROR} worktree add --detach ${shellQuote(repositoryRoot)} ${shellQuote(input.sourceSha)}`,
+			`cd ${shellQuote(repositoryRoot)}`,
 			"git config user.name 'Nazare Wind Tunnel'",
 			"git config user.email 'wind-tunnel@localhost'",
 		].join("\n"),
@@ -49,7 +60,7 @@ export async function prepareRun(
 	const prepareStartedMs = Date.now();
 	for (const command of task.prepare) {
 		const result = await sandbox.run({
-			command: `cd ${REPOSITORY_ROOT} && timeout 240s bash -lc ${shellQuote(command)}`,
+			command: `cd ${shellQuote(repositoryRoot)} && timeout 240s bash -lc ${shellQuote(command)}`,
 		});
 		if (result.exitCode !== 0)
 			throw new Error(
@@ -61,8 +72,10 @@ export async function prepareRun(
 	await sandbox.setNetworkPolicy("deny-all");
 	const preparedAt = new Date().toISOString();
 	const prepared = {
+		runId: input.runId,
 		repository: input.repository,
 		sourceSha: input.sourceSha,
+		repositoryRoot,
 		experimentPath: "inline-task",
 		task: task.agent.prompt,
 		verifyCommands: task.verify,
@@ -87,5 +100,6 @@ export async function prepareRun(
 		preparedAt,
 	};
 	preparedRun.update(() => prepared);
-	return { repositoryRoot: REPOSITORY_ROOT, ...prepared };
+	resetModelBudget();
+	return prepared;
 }
